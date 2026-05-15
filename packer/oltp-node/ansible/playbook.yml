@@ -1,0 +1,25 @@
+---
+# nexus-infra-oltp / packer / oltp-node / ansible / playbook.yml
+#
+# Ansible playbook consumed by Packer at bake time. Includes the shared
+# nexus_* roles (hostname, identity, SSH hardening, baseline) from
+# ../../../_shared/ansible/roles/ + per-OLTP-role roles defined locally.
+#
+# Substantive content lands per cluster sub-phase. This scaffold is
+# intentionally empty -- the template is non-buildable until 0.G.1 wires
+# in the Redis role.
+
+- hosts: default
+  become: true
+  roles:
+    # TODO 0.G.1+: shared roles (mirror kafka-node):
+    #   - { role: nexus_hostname, role_path: ../../_shared/ansible/roles/nexus_hostname }
+    #   - { role: nexus_identity, role_path: ../../_shared/ansible/roles/nexus_identity }
+    #   - { role: nexus_ssh,      role_path: ../../_shared/ansible/roles/nexus_ssh }
+    #   - { role: nexus_baseline, role_path: ../../_shared/ansible/roles/nexus_baseline }
+    #
+    # Per-cluster roles (added per sub-phase, all systemd-disabled at bake):
+    #   - { role: oltp_redis,   role_path: ./roles/oltp_redis }     # 0.G.1
+    #   - { role: oltp_mongo,   role_path: ./roles/oltp_mongo }     # 0.G.2
+    #   - { role: oltp_percona, role_path: ./roles/oltp_percona }   # 0.G.3
+    #   - { role: oltp_patroni, role_path: ./roles/oltp_patroni }   # 0.G.4
