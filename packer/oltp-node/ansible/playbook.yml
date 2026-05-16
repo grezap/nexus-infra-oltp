@@ -24,6 +24,7 @@
     target_user: "{{ target_user | default('nexusadmin') }}"
     # Pass-through from Packer extra-vars to role-internal names.
     oltp_node_redis_version: "{{ oltp_node_redis_version | default('apt-default') }}"
+    oltp_node_mongodb_version: "{{ oltp_node_mongodb_version | default('8.0') }}"
 
   roles:
     - nexus_identity
@@ -31,3 +32,4 @@
     - nexus_firewall
     - nexus_observability
     - oltp_redis
+    - oltp_mongo

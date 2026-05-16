@@ -22,11 +22,14 @@
  * Build-time vs clone-time vs first-boot:
  *   - Build-time (this template): single NAT NIC for apt fetch, then
  *     `vmx_remove_ethernet_interfaces = true` strips it. Apt-installed
- *     Redis 7.x (Debian 13 ships 7.4.x via `redis-server` package). The
- *     apt-shipped redis-server.service is DISABLED + MASKED at bake; the
- *     canonical unit is `nexus-redis.service` delivered DISABLED. Later
- *     0.G.* sub-phases extend the oltp_redis role (or add sibling
- *     oltp_<engine> roles) to bake mongo / percona / patroni binaries.
+ *     Redis (Debian apt main, 7.4.x or later) + MongoDB (MongoDB vendor
+ *     apt repo, 8.0.x or later via mongodb-org-server +
+ *     mongodb-mongosh + mongodb-org-tools). Both apt-shipped role
+ *     services (redis-server.service + mongod.service) are DISABLED +
+ *     MASKED at bake; the canonical units (nexus-redis.service +
+ *     nexus-mongo.service) are delivered DISABLED. Later 0.G.* sub-
+ *     phases add sibling oltp_<engine> roles to bake percona /
+ *     patroni / etc. binaries alongside.
  *   - Clone-time (terraform/modules/vm): scripts/configure-vm-nic.ps1
  *     writes ethernet0 (VMnet11) + ethernet1 (VMnet10) post-clone.
  *   - First-boot (oltp-node-firstboot.service ExecStart): MAC-OUI-byte-5
@@ -111,7 +114,7 @@ source "vmware-iso" "oltp-node" {
   vmx_remove_ethernet_interfaces = true
 
   vmx_data = {
-    "annotation"           = "oltp-node template (Phase 0.G.1+) -- built by Packer; Redis ${var.redis_version} (Debian apt main)"
+    "annotation"           = "oltp-node template (Phase 0.G.1+) -- built by Packer; Redis ${var.redis_version} (Debian apt main) + MongoDB ${var.mongodb_version} (MongoDB vendor apt)"
     "tools.upgrade.policy" = "useGlobal"
   }
 }
@@ -152,10 +155,12 @@ build {
       "../_shared/ansible/roles/nexus_firewall",
       "../_shared/ansible/roles/nexus_observability",
       "ansible/roles/oltp_redis",
+      "ansible/roles/oltp_mongo",
     ]
     extra_arguments = [
       "--extra-vars", "target_user=${var.ssh_username}",
       "--extra-vars", "oltp_node_redis_version=${var.redis_version}",
+      "--extra-vars", "oltp_node_mongodb_version=${var.mongodb_version}",
     ]
   }
 
@@ -169,24 +174,33 @@ build {
       "test -x /usr/bin/redis-cli",
       "redis-server --version",
       "redis-cli --version",
-      # nexus-redis.service is INTENTIONALLY DISABLED at template time -- the
-      # template has no per-host cluster-announce-ip yet. firstboot writes the
-      # identity env file; Terraform role-overlays render redis.conf + enable
-      # the service. `systemctl cat` exits 0 if the unit file exists in any
-      # lookup path regardless of enable-state.
+      "test -x /usr/bin/mongod",
+      "test -x /usr/bin/mongosh",
+      "mongod --version | head -1",
+      "mongosh --version",
+      # Both nexus-{redis,mongo}.service are INTENTIONALLY DISABLED at
+      # template time -- the template has no per-host identity yet.
+      # firstboot writes the identity env file; Terraform role-overlays
+      # render the per-cluster config + enable exactly one cluster's
+      # service per node. `systemctl cat` exits 0 if the unit file exists
+      # in any lookup path regardless of enable-state.
       "systemctl cat nexus-redis.service > /dev/null",
+      "systemctl cat nexus-mongo.service > /dev/null",
       "systemctl cat oltp-node-firstboot.service > /dev/null",
       "systemctl is-enabled oltp-node-firstboot",
       "systemctl is-enabled ssh",
       "systemctl is-enabled nftables",
       "systemctl is-enabled chrony",
       "systemctl is-enabled prometheus-node-exporter",
-      # The apt-shipped redis-server.service MUST be disabled + masked so a
-      # cold boot does not race nexus-redis.service for port 6379. is-enabled
-      # on a masked unit emits 'masked' to stdout AND exits non-zero (rc=1),
-      # so we grep for 'masked' against the OR'd combined output instead.
+      # Both apt-shipped services MUST be disabled + masked so a cold boot
+      # does not race nexus-{redis,mongo}.service for their listening
+      # ports. is-enabled on a masked unit emits 'masked' to stdout AND
+      # exits non-zero (rc=1), so we grep for 'masked' against the OR'd
+      # combined output.
       "systemctl is-enabled redis-server.service 2>&1 | grep -qE '^(masked|disabled)$' || (echo 'ERROR: redis-server.service is not masked/disabled' && exit 1)",
+      "systemctl is-enabled mongod.service 2>&1 | grep -qE '^(masked|disabled)$' || (echo 'ERROR: mongod.service is not masked/disabled' && exit 1)",
       "id redis",
+      "id mongodb",
       "echo '--- cleanup ---'",
       "sudo apt-get clean",
       "sudo rm -rf /var/lib/apt/lists/*",

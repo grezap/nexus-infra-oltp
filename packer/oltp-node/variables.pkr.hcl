@@ -40,6 +40,12 @@ variable "redis_version" {
   description = "Redis version source. `apt-default` (the default) installs Debian 13's bundled redis-server package (currently 7.4.x). To pin a specific upstream version, override to that version string and replace the apt task in ansible/roles/oltp_redis/tasks/main.yml with the redis vendor repo (packages.redis.io) -- not wired in 0.G.1 because the apt default is sufficient for the 6-node cluster (no Redis 7.2+-only features used)."
 }
 
+variable "mongodb_version" {
+  type        = string
+  default     = "8.0"
+  description = "MongoDB major version (X.Y) installed from the MongoDB vendor APT repo. Default 8.0 because MongoDB's 7.0 APT repo only goes through bookworm (Debian 12); the trixie (Debian 13) repo path is `mongodb-org/8.0`. Forcing 7.0 forward-compat onto trixie risks libstdc++ ABI mismatches. 8.0 is GA + supports trixie natively + is wire-compatible with 7.0 clients for our usage (rs.initiate / TLS / keyFile auth unchanged). Pin to specific X.Y.Z by passing -var mongodb_version=8.0.x at packer build time."
+}
+
 variable "cpus" {
   type        = number
   default     = 2
