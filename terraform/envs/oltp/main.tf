@@ -17,38 +17,116 @@
 terraform {
   required_version = ">= 1.9.0"
   required_providers {
-    vmware-desktop = {
-      source  = "vmware/vmware-desktop"
-      version = "~> 1.2"
-    }
-    local = {
-      source  = "hashicorp/local"
-      version = "~> 2.5"
-    }
     null = {
       source  = "hashicorp/null"
-      version = "~> 3.2"
+      version = ">= 3.2.0"
     }
   }
 }
 
-provider "vmware-desktop" {
-  # vmrun path discovered from %ProgramFiles%\VMware\VMware Workstation\vmrun.exe
-  # (the same pattern nexus-infra-kafka's kafka env uses; no explicit config
-  # needed when vmrun is on PATH).
+# Provider note: modules/vm drives vmrun.exe directly via local-exec on
+# null_resource (same pattern as nexus-infra-kafka envs/kafka). No
+# vmware-desktop / hashicorp-local providers needed at this layer.
+
+# ─── Phase 0.G.1 — Redis Cluster (6 nodes: 3 masters + 3 replicas) ────────
+# Per nexus-platform-plan/docs/infra/vms.yaml (cluster: redis, phase: 0.G).
+# Dual-NIC: VMnet11 service (DHCP via nexus-gateway dnsmasq dhcp-host
+# reservations -> .81-.84/.87/.89 owned by nexus-infra-vmware foundation) +
+# VMnet10 cluster backplane (static per-hostname IP set by
+# oltp-node-firstboot.sh; Redis Cluster bus runs on the backplane).
+
+module "redis_1" {
+  source = "../../modules/vm"
+  count  = var.enable_redis && var.enable_redis_1 ? 1 : 0
+
+  vm_name           = "redis-1"
+  template_vmx_path = "${var.template_root}/oltp-node/oltp-node.vmx"
+  vm_output_dir     = "${var.vm_output_dir_root}/05-oltp/redis-1"
+  vmrun_path        = var.vmrun_path
+
+  vnet        = var.vnet_primary
+  mac_address = var.mac_redis_1_primary
+
+  vnet_secondary = var.vnet_secondary
+  mac_secondary  = var.mac_redis_1_secondary
 }
 
-# --- TODO: per-cluster module blocks ----------------------------------------
-# Each sub-phase appends one module block per VM in the cluster, e.g.:
-#
-#   module "redis_1" {
-#     count             = var.enable_redis ? 1 : 0
-#     source            = "../../modules/vm"
-#     vm_name           = "redis-1"
-#     template_vmx_path = "${var.template_root}\\oltp-node\\oltp-node.vmx"
-#     output_dir        = "${var.vm_output_dir_root}\\05-oltp\\redis-1"
-#     mac_vmnet11       = var.mac_redis_1
-#     # ... etc.
-#   }
-#
-# Plus role overlays under role-overlay-<cluster>-<concern>.tf per cluster.
+module "redis_2" {
+  source = "../../modules/vm"
+  count  = var.enable_redis && var.enable_redis_2 ? 1 : 0
+
+  vm_name           = "redis-2"
+  template_vmx_path = "${var.template_root}/oltp-node/oltp-node.vmx"
+  vm_output_dir     = "${var.vm_output_dir_root}/05-oltp/redis-2"
+  vmrun_path        = var.vmrun_path
+
+  vnet        = var.vnet_primary
+  mac_address = var.mac_redis_2_primary
+
+  vnet_secondary = var.vnet_secondary
+  mac_secondary  = var.mac_redis_2_secondary
+}
+
+module "redis_3" {
+  source = "../../modules/vm"
+  count  = var.enable_redis && var.enable_redis_3 ? 1 : 0
+
+  vm_name           = "redis-3"
+  template_vmx_path = "${var.template_root}/oltp-node/oltp-node.vmx"
+  vm_output_dir     = "${var.vm_output_dir_root}/05-oltp/redis-3"
+  vmrun_path        = var.vmrun_path
+
+  vnet        = var.vnet_primary
+  mac_address = var.mac_redis_3_primary
+
+  vnet_secondary = var.vnet_secondary
+  mac_secondary  = var.mac_redis_3_secondary
+}
+
+module "redis_4" {
+  source = "../../modules/vm"
+  count  = var.enable_redis && var.enable_redis_4 ? 1 : 0
+
+  vm_name           = "redis-4"
+  template_vmx_path = "${var.template_root}/oltp-node/oltp-node.vmx"
+  vm_output_dir     = "${var.vm_output_dir_root}/05-oltp/redis-4"
+  vmrun_path        = var.vmrun_path
+
+  vnet        = var.vnet_primary
+  mac_address = var.mac_redis_4_primary
+
+  vnet_secondary = var.vnet_secondary
+  mac_secondary  = var.mac_redis_4_secondary
+}
+
+module "redis_5" {
+  source = "../../modules/vm"
+  count  = var.enable_redis && var.enable_redis_5 ? 1 : 0
+
+  vm_name           = "redis-5"
+  template_vmx_path = "${var.template_root}/oltp-node/oltp-node.vmx"
+  vm_output_dir     = "${var.vm_output_dir_root}/05-oltp/redis-5"
+  vmrun_path        = var.vmrun_path
+
+  vnet        = var.vnet_primary
+  mac_address = var.mac_redis_5_primary
+
+  vnet_secondary = var.vnet_secondary
+  mac_secondary  = var.mac_redis_5_secondary
+}
+
+module "redis_6" {
+  source = "../../modules/vm"
+  count  = var.enable_redis && var.enable_redis_6 ? 1 : 0
+
+  vm_name           = "redis-6"
+  template_vmx_path = "${var.template_root}/oltp-node/oltp-node.vmx"
+  vm_output_dir     = "${var.vm_output_dir_root}/05-oltp/redis-6"
+  vmrun_path        = var.vmrun_path
+
+  vnet        = var.vnet_primary
+  mac_address = var.mac_redis_6_primary
+
+  vnet_secondary = var.vnet_secondary
+  mac_secondary  = var.mac_redis_6_secondary
+}
