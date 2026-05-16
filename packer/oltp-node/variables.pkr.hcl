@@ -24,14 +24,14 @@ variable "output_directory" {
 
 variable "iso_url" {
   type        = string
-  default     = "https://cdimage.debian.org/debian-cd/13.4.0/amd64/iso-cd/debian-13.4.0-amd64-netinst.iso"
-  description = "Debian 13 netinst ISO. Same pin as nexus-infra-kafka/packer/kafka-node + nexus-infra-vmware/packer/{deb13,vault} + nexus-infra-swarm-nomad/packer/swarm-node. Override via `-var iso_url=H:/VMS/ISO/debian-13-amd64-netinst.iso` to consume the local cache per memory/project_iso_directory.md (operator's H:\\VMS\\ISO\\) -- Packer's content-addressed cache under packer_cache/ also avoids re-download across builds."
+  default     = "https://cdimage.debian.org/debian-cd/13.5.0/amd64/iso-cd/debian-13.5.0-amd64-netinst.iso"
+  description = "Debian 13.5.0 netinst ISO. NEWER point release than the canonical 13.4.0 used by nexus-infra-kafka/packer/kafka-node + nexus-infra-vmware/packer/{deb13,vault} + nexus-infra-swarm-nomad/packer/swarm-node -- bumped here at 0.G.1 ratification 2026-05-17 because the mirror dropped 13.4.0 the same day Debian published 13.5.0 (HTTP 404). The other templates' .pkr.hcl files will also need this bump the next time they get rebuilt; existing built artifacts in H:\\VMS\\NexusPlatform\\_templates\\ are frozen from when 13.4.0 was current and don't need touching. Override via `-var iso_url=H:/VMS/ISO/debian-13-amd64-netinst.iso` to consume the local cache per memory/project_iso_directory.md -- Packer's content-addressed cache under packer_cache/ also avoids re-download across builds."
 }
 
 variable "iso_checksum" {
   type        = string
-  default     = "sha256:0b813535dd76f2ea96eff908c65e8521512c92a0631fd41c95756ffd7d4896dc"
-  description = "ISO checksum (literal sha256). Same hash as deb13/vault/swarm-node/kafka-node -- all pin Debian 13.4.0 netinst."
+  default     = "sha256:95838884f5ea6c82421dfe6baaa5a639dbbe6756c1e380f9fe7a7cb0c1949d2a"
+  description = "ISO checksum (literal sha256). Pins Debian 13.5.0 netinst. Fetched from https://cdimage.debian.org/debian-cd/current/amd64/iso-cd/SHA256SUMS at 0.G.1 ratification 2026-05-17."
 }
 
 variable "redis_version" {

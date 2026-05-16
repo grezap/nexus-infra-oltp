@@ -8,6 +8,14 @@ Requires=oltp-node-firstboot.service
 # renders {{ oltp_node_config_dir }}/redis.conf (which needs Terraform-time
 # per-host cluster-announce-ip), then enables + starts this unit.
 ConditionPathExists={{ oltp_node_config_dir }}/redis.conf
+# StartLimit* live in [Unit], NOT [Service] (systemd silently ignores them
+# in [Service] with a Warning). Generous limits so a slow-to-boot peer
+# doesn't make systemd give up on cluster-bus rejoin -- mirrors the
+# vault-transit-boot-race + kafka KRaft controller-quorum lesson
+# (memory/feedback_vault_transit_boot_race_recovery.md). Moved here at
+# 0.G.1 ratification fix 2026-05-17 (was in [Service]; harmless warning).
+StartLimitBurst=15
+StartLimitIntervalSec=600
 
 [Service]
 # Type=simple (NOT notify): the apt-installed redis-server may not be built
@@ -27,13 +35,6 @@ ExecStart=/usr/bin/redis-server {{ oltp_node_config_dir }}/redis.conf
 # brittle; SIGTERM is simpler + safer.
 Restart=on-failure
 RestartSec=10
-# Redis Cluster nodes race each other at cluster boot (cluster bus gossip
-# needs peers up together). Generous StartLimit so a slow-to-boot peer
-# doesn't make systemd give up -- mirrors the vault-transit-boot-race +
-# kafka KRaft controller-quorum lesson
-# (memory/feedback_vault_transit_boot_race_recovery.md).
-StartLimitBurst=15
-StartLimitIntervalSec=600
 # RuntimeDirectory= -- systemd auto-creates /run/nexus-redis on every
 # service start (per memory/feedback_systemd_runtime_directory_tmpfs.md;
 # /var/run is tmpfs and an install-time mkdir does not survive reboot).

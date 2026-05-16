@@ -87,8 +87,30 @@ function Write-Step([string]$title) {
     Write-Host "=== $title ===" -ForegroundColor Cyan
 }
 
+function Initialize-TerraformIfNeeded {
+    # The terraform env needs `terraform init` once per checkout (downloads
+    # the null provider + materialises modules/vm). The presence of the
+    # .terraform/ dir is the canonical "init was done" marker -- this also
+    # cleanly handles a fresh clone of the repo where .terraform/ is
+    # gitignored. Idempotent: re-running terraform init on an already-init
+    # env is a no-op-fast.
+    if (-not (Test-Path (Join-Path $envDir '.terraform'))) {
+        Write-Host "[oltp] .terraform/ missing -- running `terraform init`..." -ForegroundColor Yellow
+        Push-Location $envDir
+        try {
+            & terraform init
+            if ($LASTEXITCODE -ne 0) {
+                throw "terraform init failed (exit $LASTEXITCODE)"
+            }
+        } finally {
+            Pop-Location
+        }
+    }
+}
+
 function Invoke-Terraform {
     param([Parameter(Mandatory)][string[]]$TfArgs)
+    Initialize-TerraformIfNeeded
     Push-Location $envDir
     try {
         & terraform @TfArgs

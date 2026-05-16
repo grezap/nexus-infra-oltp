@@ -80,7 +80,7 @@ resource "null_resource" "redis_tls" {
     pki_role_name = var.vault_pki_redis_role_name
     vmnet10       = each.value.vmnet10
     vmnet11       = each.value.vmnet11
-    redis_tls_v   = "1" # v1 (0.G.1) = initial straight-to-mTLS render. 3 separate output files (cert/key/ca) per Redis 7.x's TLS config shape; PKCS#8 key (mirrors kafka lesson per memory/feedback_vault_agent_template_hcl_heredoc.md).
+    redis_tls_v   = "2" # v2 (0.G.1 ratification fix 2026-05-17) = ca.crt is intermediate + root concatenated (was: intermediate only). OpenSSL strict X509 verify requires walking up to a self-signed trust anchor; the intermediate alone is not a valid trust anchor. The root comes from /etc/vault-agent/ca-bundle.crt which the 0.D.2 distribute step already places on every Vault-Agent-host. Diagnosed during live ratification -- Redis log was spamming "tlsv1 alert unknown ca" + redis-cli PING returned "certificate verify failed". v1 = initial straight-to-mTLS render; ca.crt was just `.CA` from Vault pkiCert (intermediate only) -- works for Java SSL (kafka) but not OpenSSL (redis).
 
     # Frozen for the destroy provisioner.
     destroy_vm_ip    = each.value.vmnet11
@@ -147,18 +147,35 @@ fi
 # single canonical format avoids subtle bugs and mirrors the platform lesson.
 openssl pkcs8 -topk8 -nocrypt -in "$KEY" -out "$TMP/key-pkcs8.pem"
 
-# Three separate PEM files per Redis 7.x's tls-cert-file / tls-key-file /
+# Build the full CA trust chain for ca.crt = intermediate ($CA from the
+# pkiCert bundle) + root (from the Vault-Agent-distributed bundle at
+# /etc/vault-agent/ca-bundle.crt). OpenSSL strict X509 verification (which
+# Redis's TLS uses) requires walking up to a SELF-SIGNED trust anchor; the
+# intermediate alone is not a valid anchor and verification fails with
+# "unable to get issuer certificate" / "tlsv1 alert unknown ca". Kafka's
+# Java SSL stack treats any cert in the trust store as a valid anchor (no
+# upchain walk required), which is why kafka's truststore.pem can be the
+# intermediate only -- but redis's OpenSSL is stricter. Diagnosed during
+# 0.G.1 live ratification (2026-05-17).
+ROOT_BUNDLE=/etc/vault-agent/ca-bundle.crt
+if [ ! -s "$ROOT_BUNDLE" ]; then
+  echo "[redis-tls-split] ERROR: $ROOT_BUNDLE missing -- Vault Agent must be installed first (role-overlay-redis-vault-agents.tf)" >&2
+  exit 1
+fi
+cat "$CA" "$ROOT_BUNDLE" > "$TMP/ca-chain.pem"
+
+# Three separate PEM files per Redis's tls-cert-file / tls-key-file /
 # tls-ca-cert-file shape.
-install -m 0640 -o root -g redis "$LEAF"             "$DEST/server.crt"
+install -m 0640 -o root -g redis "$LEAF"              "$DEST/server.crt"
 install -m 0640 -o root -g redis "$TMP/key-pkcs8.pem" "$DEST/server.key"
-install -m 0640 -o root -g redis "$CA"               "$DEST/ca.crt"
+install -m 0640 -o root -g redis "$TMP/ca-chain.pem"  "$DEST/ca.crt"
 
-# Operator-readable copy of the CA. /etc/nexus-redis/ is 0750 root:redis so
-# nexusadmin cannot traverse it; a world-readable copy lets a CLI run as
-# nexusadmin still chain-verify if needed.
-install -m 0644 -o root -g root "$CA" /etc/ssl/certs/redis-ca.pem
+# Operator-readable copy of the CA chain. /etc/nexus-redis/ is 0750
+# root:redis so nexusadmin cannot traverse it; a world-readable copy lets
+# a CLI run as nexusadmin still chain-verify if needed.
+install -m 0644 -o root -g root "$TMP/ca-chain.pem" /etc/ssl/certs/redis-ca.pem
 
-echo "[redis-tls-split] $(date -u +%FT%TZ) bundle split: server.crt + server.key + ca.crt (+ /etc/ssl/certs/redis-ca.pem)"
+echo "[redis-tls-split] $(date -u +%FT%TZ) bundle split: server.crt + server.key + ca.crt (intermediate+root) (+ /etc/ssl/certs/redis-ca.pem)"
 '@
 
       $splitB64 = [Convert]::ToBase64String([System.Text.UTF8Encoding]::new($false).GetBytes(($splitScript -replace "`r`n","`n")))

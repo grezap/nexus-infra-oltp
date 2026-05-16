@@ -100,6 +100,17 @@ locals {
       "bind 0.0.0.0 -::*",
       "port 0",
       "tls-port 6379",
+      "# Redis 'protected mode' refuses non-loopback connections when no",
+      "# requirepass is set -- it triggers even on TLS connections from a",
+      "# node to its own VMnet11 IP (the cluster-create scenario), erroring",
+      "# `DENIED Redis is running in protected mode`. Disabling it here is",
+      "# safe because defense-in-depth is already strong: (1) nftables",
+      "# restricts 6379+16379 to VMnet11 lab traffic; (2) tls-port + port 0",
+      "# means only TLS connections are accepted; (3) tls-auth-clients yes",
+      "# requires a valid client cert chained to the lab CA. Adding a",
+      "# requirepass on top would be redundant and complicate cluster bus",
+      "# auth (which would also need masterauth + replica auth).",
+      "protected-mode no",
       "",
       "# --- TLS ---",
       "tls-cert-file       /etc/nexus-redis/tls/server.crt",
@@ -140,7 +151,7 @@ resource "null_resource" "redis_config" {
     tls_id         = null_resource.redis_tls[each.key].id
     vmnet11        = each.value.vmnet11
     conf_sha       = sha256(local.redis_conf_rendered[each.key])
-    redis_config_v = "1" # v1 (0.G.1) = initial straight-to-mTLS config.
+    redis_config_v = "2" # v2 (0.G.1 ratification fix 2026-05-17) = added `protected-mode no` -- Redis 8.0 ships protected mode on by default; without a requirepass it rejects connections from non-loopback addresses, including a node's own VMnet11 IP. That trips `redis-cli --cluster create` (which connects to each node's external IP from the bootstrap node) with `DENIED Redis is running in protected mode`. Safe to disable: nftables firewalls 6379+16379 to VMnet11, tls-port + port 0 forces TLS-only, tls-auth-clients yes requires a valid client cert. v1 = initial straight-to-mTLS config without protected-mode override (the Redis 8.0 default tripped at the cluster-create step).
 
     destroy_vm_ip    = each.value.vmnet11
     destroy_ssh_user = var.oltp_node_user
