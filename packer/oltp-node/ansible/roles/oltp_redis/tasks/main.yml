@@ -1,0 +1,136 @@
+---
+# oltp_redis role -- install Redis (Debian apt), the firstboot script, and
+# systemd units (all delivered DISABLED -- the Terraform role-overlays
+# render redis.conf + enable nexus-redis.service per-host). Runs after the
+# four shared nexus_* roles inside the oltp-node Packer template.
+#
+# Later 0.G.* sub-phases add sibling roles (oltp_mongo / oltp_percona /
+# oltp_patroni) installing their engine alongside Redis on the SAME
+# template. The firstboot script's IP-to-role map picks which engine each
+# clone runs.
+
+# ─── Redis package install (Debian 13 main = 7.4.x) ──────────────────────
+- name: Install redis-server + redis-tools (Debian apt)
+  ansible.builtin.apt:
+    name:
+      - redis-server
+      - redis-tools
+    state: present
+    update_cache: true
+  when: oltp_node_redis_version == 'apt-default'
+
+- name: Refuse pinned redis_version (not implemented in 0.G.1)
+  ansible.builtin.fail:
+    msg: >-
+      oltp_node_redis_version='{{ oltp_node_redis_version }}' requested but
+      only 'apt-default' is wired in 0.G.1. To pin a specific upstream
+      version, extend roles/oltp_redis/tasks/main.yml with the redis vendor
+      repo (packages.redis.io) gpg key + apt source + apt install.
+  when: oltp_node_redis_version != 'apt-default'
+
+# ─── Disable + mask the apt-shipped redis-server.service ─────────────────
+# Debian's apt install enables redis-server.service by default (binds 6379).
+# Our canonical unit is nexus-redis.service which reads /etc/nexus-redis/
+# redis.conf (NOT /etc/redis/redis.conf). Leaving the apt unit enabled would
+# race nexus-redis.service for port 6379 on cold boot. Mask is stronger
+# than disable (survives `systemctl enable redis-server.service`).
+- name: Stop redis-server.service (apt-installed) if running
+  ansible.builtin.systemd:
+    name: redis-server.service
+    state: stopped
+  failed_when: false
+
+- name: Disable + mask redis-server.service (apt-installed)
+  ansible.builtin.systemd:
+    name: redis-server.service
+    enabled: false
+    masked: true
+
+# ─── Redis system account (apt creates it; verify only) ──────────────────
+- name: Verify redis group exists (apt-created)
+  ansible.builtin.getent:
+    database: group
+    key: "{{ oltp_node_group }}"
+
+- name: Verify redis user exists (apt-created)
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ oltp_node_user }}"
+
+# ─── Per-node config + data + log dirs ────────────────────────────────────
+# config dir is root:redis 0750 -- Terraform overlays write here as root,
+# nexus-redis.service reads as redis. Same pattern as kafka's
+# /etc/nexus-kafka.
+- name: Create nexus-redis directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "{{ oltp_node_config_dir }}", owner: root, group: "{{ oltp_node_group }}", mode: '0750' }
+    - { path: "{{ oltp_node_config_dir }}/tls", owner: root, group: "{{ oltp_node_group }}", mode: '0750' }
+    - { path: "{{ oltp_node_data_dir }}", owner: "{{ oltp_node_user }}", group: "{{ oltp_node_group }}", mode: '0750' }
+    - { path: "{{ oltp_node_log_dir }}", owner: "{{ oltp_node_user }}", group: "{{ oltp_node_group }}", mode: '0750' }
+
+# ─── nexus-redis.service (DISABLED at bake) ──────────────────────────────
+- name: Install nexus-redis.service systemd unit
+  ansible.builtin.template:
+    src: nexus-redis.service.j2
+    dest: /etc/systemd/system/nexus-redis.service
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Reload systemd
+
+# nexus-redis.service is enabled BY role-overlay-redis-config.tf after
+# redis.conf is rendered -- the template has no per-host
+# cluster-announce-ip yet, so a cold start would fail or come up without
+# cluster mode. Explicitly disable here so an apt-shipped enabled default
+# (different unit name in our case, but same defensive intent) does not
+# accidentally start the wrong configuration.
+- name: Ensure nexus-redis.service is disabled at bake
+  ansible.builtin.systemd:
+    name: nexus-redis.service
+    enabled: false
+    daemon_reload: true
+
+# ─── Firstboot ────────────────────────────────────────────────────────────
+- name: Install oltp-node-firstboot.sh
+  ansible.builtin.copy:
+    src: oltp-node-firstboot.sh
+    dest: /usr/local/sbin/oltp-node-firstboot.sh
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Install oltp-node-firstboot.service systemd unit
+  ansible.builtin.template:
+    src: oltp-node-firstboot.service.j2
+    dest: /etc/systemd/system/oltp-node-firstboot.service
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Reload systemd
+
+- name: Enable oltp-node-firstboot.service (runs once on first clone boot)
+  ansible.builtin.systemd:
+    name: oltp-node-firstboot.service
+    enabled: true
+    daemon_reload: true
+
+# ─── Verify ──────────────────────────────────────────────────────────────
+- name: Verify Redis tooling
+  ansible.builtin.command: "{{ item }}"
+  changed_when: false
+  loop:
+    - redis-server --version
+    - redis-cli --version
+  register: oltp_redis_verify
+
+- name: Show installed Redis version
+  ansible.builtin.debug:
+    msg:
+      - "Redis (apt): {{ oltp_redis_verify.results[0].stdout }}"
+      - "Source:      {{ oltp_node_redis_version }}"

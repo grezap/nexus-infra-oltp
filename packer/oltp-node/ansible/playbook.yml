@@ -1,25 +1,33 @@
 ---
-# nexus-infra-oltp / packer / oltp-node / ansible / playbook.yml
+# oltp-node -- Ansible playbook (local, run by Packer ansible-local provisioner)
 #
-# Ansible playbook consumed by Packer at bake time. Includes the shared
-# nexus_* roles (hostname, identity, SSH hardening, baseline) from
-# ../../../_shared/ansible/roles/ + per-OLTP-role roles defined locally.
+# Same shape as nexus-infra-kafka/packer/kafka-node/ansible/playbook.yml.
+# Four shared nexus_* roles run first, then oltp_redis installs apt-shipped
+# Redis 7.x, the firstboot script + systemd units (all role units delivered
+# DISABLED -- the Terraform role-overlays render config + enable per-host).
 #
-# Substantive content lands per cluster sub-phase. This scaffold is
-# intentionally empty -- the template is non-buildable until 0.G.1 wires
-# in the Redis role.
+# Order: nexus_identity (sshd) -> nexus_network (NIC rename) -> nexus_firewall
+# (rules need nic0/nic1 to exist) -> nexus_observability (node_exporter
+# binding uses the renamed NIC) -> oltp_redis (assumes the baseline is up).
+#
+# Later 0.G.* sub-phases add sibling roles (oltp_mongo / oltp_percona /
+# oltp_patroni) that install their engine alongside Redis on the SAME
+# template -- firstboot's IP-to-role map picks which engine each clone runs.
 
-- hosts: default
+- name: Configure oltp-node template (Phase 0.G.1+)
+  hosts: localhost
+  connection: local
   become: true
+  gather_facts: true
+
+  vars:
+    target_user: "{{ target_user | default('nexusadmin') }}"
+    # Pass-through from Packer extra-vars to role-internal names.
+    oltp_node_redis_version: "{{ oltp_node_redis_version | default('apt-default') }}"
+
   roles:
-    # TODO 0.G.1+: shared roles (mirror kafka-node):
-    #   - { role: nexus_hostname, role_path: ../../_shared/ansible/roles/nexus_hostname }
-    #   - { role: nexus_identity, role_path: ../../_shared/ansible/roles/nexus_identity }
-    #   - { role: nexus_ssh,      role_path: ../../_shared/ansible/roles/nexus_ssh }
-    #   - { role: nexus_baseline, role_path: ../../_shared/ansible/roles/nexus_baseline }
-    #
-    # Per-cluster roles (added per sub-phase, all systemd-disabled at bake):
-    #   - { role: oltp_redis,   role_path: ./roles/oltp_redis }     # 0.G.1
-    #   - { role: oltp_mongo,   role_path: ./roles/oltp_mongo }     # 0.G.2
-    #   - { role: oltp_percona, role_path: ./roles/oltp_percona }   # 0.G.3
-    #   - { role: oltp_patroni, role_path: ./roles/oltp_patroni }   # 0.G.4
+    - nexus_identity
+    - nexus_network
+    - nexus_firewall
+    - nexus_observability
+    - oltp_redis
