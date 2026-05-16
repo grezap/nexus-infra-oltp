@@ -139,6 +139,13 @@ pwsh -File scripts\oltp.ps1 plan
 cd terraform\envs\oltp
 terraform apply -auto-approve -target='null_resource.redis_config["redis-3"]'
 cd -
+
+# 0.G.2 -- Bring up only mongo (skip redis + later 0.G.* clusters):
+pwsh -File scripts\oltp.ps1 apply -Vars enable_redis=false,enable_percona=false,enable_patroni=false,enable_sql=false
+
+# 0.G.2 -- Skip the rs-initiate step (e.g. when forming the RS manually
+# via mongosh for debugging):
+pwsh -File scripts\oltp.ps1 apply -Vars enable_mongo_rs_initiate=false
 ```
 
 ### §1.6 Tear down
@@ -165,8 +172,8 @@ Destroy ordering is the reverse of apply (cluster-create destroy-time noop → r
 
 | Sub-phase | Cluster | TF | Packer | Smoke | Status | Closed |
 |---|---|---|---|---|---|---|
-| 0.G.1 | Redis Cluster (6 nodes) | `terraform/envs/oltp/` ✅ | `packer/oltp-node/` ✅ | `smoke-0.G.1.ps1` ✅ | scaffolding in place; first build + apply pending operator | — |
-| 0.G.2 | MongoDB RS (3 nodes) | TBD | extends oltp-node | `smoke-0.G.2.ps1` | not started | — |
+| 0.G.1 | Redis Cluster (6 nodes) | `terraform/envs/oltp/` ✅ | `packer/oltp-node/` ✅ | `smoke-0.G.1.ps1` ✅ | ✅ PROVEN cold-rebuildable (2026-05-17) | 2026-05-17 |
+| 0.G.2 | MongoDB RS (3 nodes) | `terraform/envs/oltp/` (mongo overlays) ✅ | `packer/oltp-node/` (extended with oltp_mongo role) ✅ | `smoke-0.G.2.ps1` ✅ | scaffolding in place; first build + apply pending operator | — |
 | 0.G.3 | Percona PXC + ProxySQL (5 nodes) | TBD | extends oltp-node | `smoke-0.G.3.ps1` | not started | — |
 | 0.G.4 | Patroni + etcd + HAProxy (7 nodes) | TBD | extends oltp-node | `smoke-0.G.4.ps1` | not started | — |
 | 0.G.7 | SQL Server FCI + AG (4 ws2025 nodes) | TBD | NEW ws2025 template | `smoke-0.G.7.ps1` | not started | — |
