@@ -1,6 +1,7 @@
 /*
  * role-overlay-oltp-nftables-backplane.tf -- push the oltp-node nftables
- * ruleset to every redis node + `nft -f` for atomic replacement.
+ * ruleset to every enabled oltp-tier node (redis + mongo) + `nft -f` for
+ * atomic replacement.
  *
  * Same shape as nexus-infra-kafka's role-overlay-nftables-backplane.tf:
  *   - Per memory/feedback_nftables_runtime_add_after_drop.md: patch the file
@@ -34,7 +35,11 @@
  */
 
 locals {
-  # Enabled redis-node VMnet11 IPs (the ssh target set).
+  # All enabled oltp-node VMnet11 IPs (the ssh target set). Single ruleset
+  # across all oltp clusters -- a redis node gets port 27017 accept too
+  # (harmless: nothing listens there), and vice versa for mongo on 6379.
+  # Keeping one ruleset for the whole tier matches the kafka pattern
+  # (broker + ecosystem share one ruleset).
   redis_node_ips = compact([
     var.enable_redis_1 ? "192.168.70.81" : "",
     var.enable_redis_2 ? "192.168.70.82" : "",
@@ -43,6 +48,15 @@ locals {
     var.enable_redis_5 ? "192.168.70.87" : "",
     var.enable_redis_6 ? "192.168.70.89" : "",
   ])
+  mongo_node_ips = compact([
+    var.enable_mongo_1 ? "192.168.70.71" : "",
+    var.enable_mongo_2 ? "192.168.70.72" : "",
+    var.enable_mongo_3 ? "192.168.70.73" : "",
+  ])
+  oltp_node_ips = concat(
+    var.enable_redis ? local.redis_node_ips : [],
+    var.enable_mongo ? local.mongo_node_ips : [],
+  )
 
   # Inlined oltp-node nftables ruleset. Whole-segment VMnet10 trust + the
   # operator/data ports on VMnet11. Mirrors deb13 baseline + kafka-node shape.
@@ -50,7 +64,7 @@ locals {
     #!/usr/sbin/nft -f
     # Managed by nexus-infra-oltp/terraform/envs/oltp/role-overlay-oltp-nftables-backplane.tf
     # DO NOT EDIT BY HAND -- terraform overlay re-applies on every apply.
-    # ruleset_v=1
+    # ruleset_v=2
 
     flush ruleset
 
@@ -65,15 +79,18 @@ locals {
         meta l4proto icmp accept
         meta l4proto ipv6-icmp accept
 
-        # ─── VMnet11 service network (mgmt + Redis clients) ────────────────
+        # ─── VMnet11 service network (mgmt + per-cluster data ports) ──────
         iifname "nic0" tcp dport 22 accept    # sshd (build-host reachability)
-        iifname "nic0" tcp dport 6379 accept  # Redis TLS data port
-        iifname "nic0" tcp dport 16379 accept # Redis Cluster bus (cross-tier MM2-style traffic later)
+        iifname "nic0" tcp dport 6379 accept  # Redis TLS data port (0.G.1)
+        iifname "nic0" tcp dport 16379 accept # Redis Cluster bus (0.G.1)
+        iifname "nic0" tcp dport 27017 accept # MongoDB TLS data port (0.G.2 -- also serves RS heartbeat / replication / election traffic between members on the same port)
 
         # ─── VMnet10 cluster backplane (whole-segment trust) ────────────────
         # Mirrors nexus-infra-swarm-nomad's swarm-node + nexus-infra-kafka's
-        # kafka-node "whole-segment accept" pattern. Cluster bus (16379) +
-        # replication (6379) flow over the backplane.
+        # kafka-node "whole-segment accept" pattern. Cluster bus + replication
+        # flow over the backplane when configured (0.G.1 redis cluster bus
+        # still runs on VMnet11 for simplicity; backplane trust is preserved
+        # for future scale-out flexibility).
         iifname "nic1" ip saddr 192.168.10.0/24 accept
 
         counter drop
@@ -91,7 +108,7 @@ locals {
 }
 
 resource "null_resource" "oltp_nftables_backplane" {
-  count = var.enable_redis && var.enable_nftables_backplane ? 1 : 0
+  count = (var.enable_redis || var.enable_mongo) && var.enable_nftables_backplane ? 1 : 0
 
   triggers = {
     redis_1     = length(module.redis_1) > 0 ? module.redis_1[0].vm_name : "absent"
@@ -100,20 +117,24 @@ resource "null_resource" "oltp_nftables_backplane" {
     redis_4     = length(module.redis_4) > 0 ? module.redis_4[0].vm_name : "absent"
     redis_5     = length(module.redis_5) > 0 ? module.redis_5[0].vm_name : "absent"
     redis_6     = length(module.redis_6) > 0 ? module.redis_6[0].vm_name : "absent"
+    mongo_1     = length(module.mongo_1) > 0 ? module.mongo_1[0].vm_name : "absent"
+    mongo_2     = length(module.mongo_2) > 0 ? module.mongo_2[0].vm_name : "absent"
+    mongo_3     = length(module.mongo_3) > 0 ? module.mongo_3[0].vm_name : "absent"
     ruleset_sha = sha256(local.oltp_nftables_ruleset)
-    overlay_v   = "1" # v1 (0.G.1) = initial 6-node Redis Cluster ruleset.
+    overlay_v   = "2" # v2 (0.G.2) = added port 27017 + mongo node IPs to the push set. v1 = 6-node Redis Cluster only.
   }
 
   depends_on = [
     module.redis_1, module.redis_2, module.redis_3,
     module.redis_4, module.redis_5, module.redis_6,
+    module.mongo_1, module.mongo_2, module.mongo_3,
   ]
 
   provisioner "local-exec" {
     when        = create
     interpreter = ["pwsh", "-NoProfile", "-Command"]
     command     = <<-PWSH
-      $ips     = @('${join("','", local.redis_node_ips)}')
+      $ips     = @('${join("','", local.oltp_node_ips)}')
       $user    = '${var.oltp_node_user}'
       $timeout = ${var.oltp_cluster_timeout_minutes}
       $sshOpts = @('-o','ConnectTimeout=5','-o','BatchMode=yes','-o','StrictHostKeyChecking=no')
@@ -125,7 +146,7 @@ ${local.oltp_nftables_ruleset}
       $ruleset = $ruleset -replace "`r`n","`n"
 
       if ($ips.Count -eq 0 -or $ips[0] -eq '') {
-        Write-Host "[oltp-nftables] no enabled redis nodes -- nothing to do"
+        Write-Host "[oltp-nftables] no enabled oltp nodes -- nothing to do"
         exit 0
       }
 
@@ -156,7 +177,7 @@ ${local.oltp_nftables_ruleset}
         Write-Host "[oltp-nftables] $${ip}: ruleset applied"
       }
 
-      Write-Host "[oltp-nftables] all $($ips.Count) redis-node(s) converged on the oltp-node ruleset"
+      Write-Host "[oltp-nftables] all $($ips.Count) oltp-node(s) converged on the oltp-node ruleset"
     PWSH
   }
 }

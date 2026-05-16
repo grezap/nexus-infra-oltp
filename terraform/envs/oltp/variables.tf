@@ -269,3 +269,102 @@ variable "vault_pki_redis_role_name" {
   default     = "redis-server"
   description = "Name of the Vault PKI role under pki_int/ that issues leaf certs for the 6-node Redis cluster. Must match var.vault_pki_redis_role_name in nexus-infra-vmware's security env."
 }
+
+# ─── Phase 0.G.2 — MongoDB Replica Set (3 nodes) ──────────────────────────
+# Per nexus-platform-plan/docs/infra/vms.yaml (cluster: mongo, phase: 0.G).
+# Per-VM toggles + MACs + overlay toggles. Primary MACs MUST match
+# nexus-infra-vmware foundation env's mac_oltp_mongo_N_primary defaults
+# (the dhcp-host reservations pin those MACs to .71/.72/.73 on VMnet11).
+
+variable "enable_mongo_1" {
+  type    = bool
+  default = true
+}
+variable "enable_mongo_2" {
+  type    = bool
+  default = true
+}
+variable "enable_mongo_3" {
+  type    = bool
+  default = true
+}
+
+variable "mac_mongo_1_primary" {
+  type        = string
+  default     = "00:50:56:3F:00:76"
+  description = "mongo-1 primary NIC MAC (VMnet11). dnsmasq dhcp-host pins this to 192.168.70.71."
+}
+variable "mac_mongo_1_secondary" {
+  type        = string
+  default     = "00:50:56:3F:01:76"
+  description = "mongo-1 secondary NIC MAC (VMnet10). oltp-node-firstboot.sh assigns 192.168.10.71 statically."
+}
+variable "mac_mongo_2_primary" {
+  type    = string
+  default = "00:50:56:3F:00:77"
+}
+variable "mac_mongo_2_secondary" {
+  type    = string
+  default = "00:50:56:3F:01:77"
+}
+variable "mac_mongo_3_primary" {
+  type    = string
+  default = "00:50:56:3F:00:78"
+}
+variable "mac_mongo_3_secondary" {
+  type    = string
+  default = "00:50:56:3F:01:78"
+}
+
+# ─── Per-overlay toggles for the Mongo cluster (chunk 3c) ─────────────────
+
+variable "enable_mongo_vault_agents" {
+  type        = bool
+  default     = true
+  description = "Master gate for role-overlay-mongo-vault-agents.tf -- install nexus-vault-agent.service on all 3 mongo nodes. Reads the per-host AppRole sidecars written by nexus-infra-vmware's security env."
+}
+
+variable "enable_mongo_1_vault_agent" {
+  type    = bool
+  default = true
+}
+variable "enable_mongo_2_vault_agent" {
+  type    = bool
+  default = true
+}
+variable "enable_mongo_3_vault_agent" {
+  type    = bool
+  default = true
+}
+
+variable "enable_mongo_tls" {
+  type        = bool
+  default     = true
+  description = "role-overlay-mongo-tls.tf -- drop the Vault Agent PKI template that renders /etc/nexus-mongo/{server.pem,ca.crt} + the keyFile template that renders /etc/nexus-mongo/keyfile from Vault KV (nexus/oltp/mongo/keyfile sticky-seed). Default true."
+}
+
+variable "enable_mongo_config" {
+  type        = bool
+  default     = true
+  description = "role-overlay-mongo-config.tf -- render /etc/nexus-mongo/mongod.conf per-node (bind_ip_all + net.tls.mode=requireTLS + replication.replSetName=nexus-rs + security.keyFile + cluster announce IP). Default true."
+}
+
+variable "enable_mongo_rs_initiate" {
+  type        = bool
+  default     = true
+  description = "role-overlay-mongo-rs-initiate.tf -- one-shot probe-then-init: detect via `mongosh --eval rs.status()` whether the RS exists; if not, run rs.initiate({_id:'nexus-rs', members:[mongo-1, mongo-2, mongo-3]}) from mongo-1; assert rs.status() shows 1 PRIMARY + 2 SECONDARY. Default true."
+}
+
+# ─── Phase 0.G.2 — Mongo Vault Agent + PKI cross-env coupling ─────────────
+
+variable "vault_agent_mongo_creds_dir" {
+  type        = string
+  default     = "$HOME/.nexus"
+  description = "Directory on the build host holding the 3 vault-agent-oltp-mongo-<host>.json AppRole sidecars (written by nexus-infra-vmware security env's role-overlay-vault-agent-mongo-approles.tf)."
+}
+
+variable "vault_pki_mongo_role_name" {
+  type        = string
+  default     = "mongo-server"
+  description = "Name of the Vault PKI role under pki_int/ that issues leaf certs for the 3-node MongoDB Replica Set. Must match var.vault_pki_mongo_role_name in nexus-infra-vmware's security env."
+}

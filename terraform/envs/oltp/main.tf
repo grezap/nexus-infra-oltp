@@ -130,3 +130,59 @@ module "redis_6" {
   vnet_secondary = var.vnet_secondary
   mac_secondary  = var.mac_redis_6_secondary
 }
+
+# ─── Phase 0.G.2 — MongoDB Replica Set (3 nodes: PRIMARY + 2 SECONDARY) ──
+# Per nexus-platform-plan/docs/infra/vms.yaml (cluster: mongo, phase: 0.G).
+# Dual-NIC: VMnet11 service (DHCP via nexus-gateway dnsmasq dhcp-host
+# reservations → .71/.72/.73 owned by nexus-infra-vmware foundation env
+# v2 marker) + VMnet10 cluster backplane (static per-hostname IP set by
+# oltp-node-firstboot.sh; reserved for future cross-RS replication if
+# needed).
+
+module "mongo_1" {
+  source = "../../modules/vm"
+  count  = var.enable_mongo && var.enable_mongo_1 ? 1 : 0
+
+  vm_name           = "mongo-1"
+  template_vmx_path = "${var.template_root}/oltp-node/oltp-node.vmx"
+  vm_output_dir     = "${var.vm_output_dir_root}/05-oltp/mongo-1"
+  vmrun_path        = var.vmrun_path
+
+  vnet        = var.vnet_primary
+  mac_address = var.mac_mongo_1_primary
+
+  vnet_secondary = var.vnet_secondary
+  mac_secondary  = var.mac_mongo_1_secondary
+}
+
+module "mongo_2" {
+  source = "../../modules/vm"
+  count  = var.enable_mongo && var.enable_mongo_2 ? 1 : 0
+
+  vm_name           = "mongo-2"
+  template_vmx_path = "${var.template_root}/oltp-node/oltp-node.vmx"
+  vm_output_dir     = "${var.vm_output_dir_root}/05-oltp/mongo-2"
+  vmrun_path        = var.vmrun_path
+
+  vnet        = var.vnet_primary
+  mac_address = var.mac_mongo_2_primary
+
+  vnet_secondary = var.vnet_secondary
+  mac_secondary  = var.mac_mongo_2_secondary
+}
+
+module "mongo_3" {
+  source = "../../modules/vm"
+  count  = var.enable_mongo && var.enable_mongo_3 ? 1 : 0
+
+  vm_name           = "mongo-3"
+  template_vmx_path = "${var.template_root}/oltp-node/oltp-node.vmx"
+  vm_output_dir     = "${var.vm_output_dir_root}/05-oltp/mongo-3"
+  vmrun_path        = var.vmrun_path
+
+  vnet        = var.vnet_primary
+  mac_address = var.mac_mongo_3_primary
+
+  vnet_secondary = var.vnet_secondary
+  mac_secondary  = var.mac_mongo_3_secondary
+}
