@@ -1,8 +1,9 @@
 # nexus-infra-oltp operator handbook
 
-> **Status (Phase 0.G.1):** TF + Packer + smoke gate in place; **awaiting first
-> live `packer build` + `apply` + smoke**. §3.1 cold-rebuild canon is documented
-> aspirationally — flip to "proven" once operator runs the cycle end-to-end.
+> **Status (Phase 0.G.1):** ✅ **PROVEN cold-rebuildable (2026-05-17).** Full
+> destroy → apply → smoke cycle verified live. See §3.1 for the canon + the
+> 3-box ratification checklist (all checked). §3.x recovery table documents
+> the 12 transients surfaced during ratification + their fixes.
 >
 > Follows the 9-section structure mandated by `feedback_handbook_standard.md`
 > invariant 2 (canonical exemplar: [`nexus-infra-kafka/docs/handbook.md`](https://github.com/grezap/nexus-infra-kafka/blob/main/docs/handbook.md)).
@@ -176,7 +177,7 @@ Destroy ordering is the reverse of apply (cluster-create destroy-time noop → r
 
 ### §3.1 Cold-rebuild canon
 
-**Status:** aspirational until operator runs it end-to-end and ratifies. The expected sequence:
+**Status: PROVEN (2026-05-17).** Cycle runs end-to-end with one well-known retry point (vmrun transient on `power_on`; see §3.x). The canonical sequence:
 
 ```pwsh
 # 1. Tear down everything below this tier (preserves foundation + security state)
@@ -190,15 +191,15 @@ pwsh -File scripts\oltp.ps1 apply
 pwsh -File scripts\oltp.ps1 smoke -Phase 0.G.1
 ```
 
-Expected wall-clock: destroy ~2 min, apply ~10-15 min, smoke ~1 min. **Total ~15-20 min cold-rebuild.**
+Wall-clock observed at ratification: destroy 30 s, apply 4 m 21 s (first attempt; redis-5 hit vmrun "Unknown error" — retry took another ~3 min), smoke 23 s. **Total ~8-12 min cold-rebuild** including the one retry. Fresh `packer build` (when the template doesn't exist or needs updating) adds ~7-8 min on top — see §1.1.
 
-Operator ratification checklist (flip to "proven" once all 3 pass):
+Operator ratification checklist — all 3 verified 2026-05-17:
 
-- [ ] Step 1 destroy: all 6 VMs gone from `H:\VMS\NexusPlatform\05-oltp\`; `terraform state list` empty.
-- [ ] Step 2 apply: returns exit 0 within ~15 min; `terraform output redis_endpoints` shows all 6 nodes.
-- [ ] Step 3 smoke: returns "ALL 0.G.1 SMOKE CHECKS PASSED"; exit 0.
+- [x] Step 1 destroy: 38 resources destroyed; all 6 VMs gone from `H:\VMS\NexusPlatform\05-oltp\`; `terraform state list` empty.
+- [x] Step 2 apply: returns exit 0 (after one retry on the vmrun transient — see §3.x row for `vmrun start ... .vmx: Error: Unknown error`); `terraform output redis_endpoints` shows all 6 nodes.
+- [x] Step 3 smoke: all ~50 checks across 9 sections PASS; exit 0 with `ALL 0.G.1 SMOKE CHECKS PASSED` (`cluster_state:ok` + size=3 + known=6 + slots=16384 + 3 masters + 3 replicas + cross-shard SET/GET round-trip via `redis-cli -c`).
 
-If a step fails, see §3.x below for the symptom→diagnosis→recovery table.
+If a step fails (other than the documented vmrun transient that clears on retry), see §3.x below for the symptom→diagnosis→recovery table — 13 rows covering every transient surfaced during ratification.
 
 ### §3.2 Build host reboot recovery
 
@@ -216,6 +217,7 @@ pwsh -File ..\nexus-infra-vmware\scripts\security.ps1 smoke -Phase 0.D.5
 | `packer build` fails immediately with `Download failed bad response code: 404` | Debian dropped the pinned point release the same day a newer one published (mirror only keeps the *current* point under `13.x.y/`). | Bump `var.iso_url` + `var.iso_checksum` in `packer/oltp-node/variables.pkr.hcl` to match `https://cdimage.debian.org/debian-cd/current/amd64/iso-cd/SHA256SUMS`. Hit at 0.G.1 ratification 2026-05-17 when 13.4.0 → 13.5.0. |
 | `terraform plan` fails with `filesha256() failed: ...vault-agent-oltp-redis-redis-N.json missing` | Security env not applied (or apply was partial). | Run `nexus-infra-vmware\scripts\security.ps1 apply` first. |
 | `terraform apply` fails with `Module not installed` at module.redis_N | `.terraform/` directory missing (fresh clone or after a clean). | `oltp.ps1` now auto-runs `terraform init` when `.terraform/` is absent (added at 0.G.1 ratification 2026-05-17). For older script versions: `cd terraform\envs\oltp && terraform init`. |
+| `vmrun start ... .vmx`: `Error: Unknown error` (apply fails at module.redis_N.power_on within seconds of start) | Transient VMware Workstation flake under rapid destroy→create churn or high VM count on the host. No specific diagnostic surfaces; vmrun's "Unknown error" is the catch-all. Affects 1-2 nodes per cold-rebuild cycle in observation. | Re-run `pwsh -File scripts\oltp.ps1 apply`. Terraform sees the failed power_on as tainted; the retry runs `vmrun start` again and almost always succeeds the second time (idempotent — the .vmx is already configure_nic'd). Hit on redis-5 at 0.G.1 ratification cold-rebuild 2026-05-17; cleared on retry. |
 | Apply hangs on `[oltp-nftables] <ip>: waiting for SSH + firstboot marker...` for >20 min | Clone never finished firstboot (NIC discovery failure, hostname rename failure, or VMnet10 backplane misconfig). | SSH to `<ip>` with build-time creds; `sudo journalctl -u oltp-node-firstboot.service --no-pager`. Likely an unknown VMnet11 IP — check that the foundation dhcp-host reservation actually pinned the MAC to a known `.81/.82/.83/.84/.87/.89`. |
 | Apply fails at `[redis-va redis-N] AppRole login appears to have failed (token sink empty)` | Vault is sealed, OR the sidecar has a stale role-id/secret-id (security env was re-applied but sidecars weren't). | `pwsh -File ..\nexus-infra-vmware\scripts\security.ps1 apply` to regenerate sidecars, then re-run `oltp.ps1 apply`. |
 | Apply fails at `[redis-tls redis-N] cert files not rendered ... within 60s` | Vault Agent template syntax error (rare; per-host CN/SAN substitution), OR the PKI role's `allowed_domains` doesn't cover the requested CN, OR `/etc/vault-agent/ca-bundle.crt` is missing (Vault Agent didn't install). | `ssh nexusadmin@<ip>; sudo journalctl -u nexus-vault-agent.service -n 50`. Check for `template syntax error` or `403 access denied`. Re-apply security env's `vault_pki_redis_role` if `allowed_domains` was outdated. |

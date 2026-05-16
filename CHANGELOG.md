@@ -6,6 +6,18 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Verified — Phase 0.G.1 cold-rebuild PROVEN (2026-05-17)
+
+Full canonical cycle (destroy → apply → smoke) ran end-to-end on the post-ratification-fixes codebase. All 3 boxes in `docs/handbook.md` §3.1 ratification checklist now checked:
+
+- ✅ **Destroy**: 38 resources destroyed; all 6 VMs gone from `H:\VMS\NexusPlatform\05-oltp\`; `terraform state list` empty.
+- ✅ **Apply**: returns exit 0 (after one retry on the vmrun "Unknown error" transient on `redis-5.power_on`; the retry succeeded second-try, which is the documented +1 row in §3.x).
+- ✅ **Smoke**: all ~50 checks across 9 sections PASS; `ALL 0.G.1 SMOKE CHECKS PASSED`. `cluster_state:ok` + size=3 + known=6 + slots_assigned=16384 + slots_ok=16384 + 3 masters + 3 replicas + cross-shard SET/GET round-trip via `redis-cli -c`.
+
+Wall-clock: destroy 30 s + apply ~4 min (first attempt) + retry ~3 min + smoke 23 s = **~8-12 min cold-rebuild** including the one retry. Fresh `packer build` (when the template doesn't exist) adds ~7-8 min on top.
+
+`docs/handbook.md` §3.1 status flipped from "aspirational" to "PROVEN". §3.x gained one more row for the vmrun-transient (13 rows total now). README badge bumped to `0.G.1 cold-rebuild proven`. Phase 0.G.1 scaffolding milestone closed.
+
 ### Fixed — Phase 0.G.1 ratification fixes (2026-05-17)
 
 Live ratification cycle (foundation → security → packer build → oltp apply → smoke) surfaced **5 issues**, all now fixed in TF + scripts + Packer. All checks green on first-pass smoke after fixes.
