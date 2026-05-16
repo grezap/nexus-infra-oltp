@@ -50,6 +50,19 @@ $bootstrapIp = $nodeIps[0]   # mongo-1
 $sshOpts = @('-o', 'ConnectTimeout=5', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=no')
 $tlsArgs = '--tls --tlsCAFile /etc/nexus-mongo/tls/ca.crt --tlsCertificateKeyFile /etc/nexus-mongo/tls/server.pem'
 
+# Cluster-status commands like rs.status() require auth in 8.0+keyFile
+# replica sets. The localhost-exception is disabled. We auth as __system
+# via SCRAM-SHA-256 with the keyFile content as the password -- the
+# pragmatic cluster-admin bootstrap path (per 0.G.2 ratification lesson;
+# see handbook §3.x). Read the keyFile once + reuse for all status calls.
+$keyfile = ($null)
+function Get-SystemAuthArgs {
+    if ($null -eq $script:keyfile) {
+        $script:keyfile = (ssh @sshOpts "$user@$bootstrapIp" 'sudo cat /etc/nexus-mongo/keyfile' 2>&1 | Out-String).Trim()
+    }
+    return "--username __system --password '$script:keyfile' --authenticationDatabase local --authenticationMechanism SCRAM-SHA-256"
+}
+
 $failures = @()
 $warnings = @()
 
@@ -247,50 +260,72 @@ foreach ($ip in $nodeIps) {
 # ─── Section 9: RS health + write/read round-trip (0.G.2 exit gate) ───────
 Write-Section 'RS health + write/read round-trip (0.G.2 exit gate)'
 
-# Single eval that emits a 4-line summary.
+# Single eval that emits a 4-line summary. Auth as __system (rs.status
+# requires replSetGetStatus privilege which only clusterAdmin / __system
+# has -- smoke-rw is too narrow).
+$sysAuth = Get-SystemAuthArgs
 $statusEval = "var s=rs.status(); var p=0,sec=0,h=0; s.members.forEach(function(m){if(m.stateStr=='PRIMARY')p++; if(m.stateStr=='SECONDARY')sec++; if(m.health==1)h++}); print('PRIMARY='+p); print('SECONDARY='+sec); print('HEALTH='+h); print('MEMBERS='+s.members.length)"
-$rsStatus = Invoke-RemoteCommand -Ip $bootstrapIp -Command "sudo mongosh --quiet $tlsArgs --host 127.0.0.1:27017 --eval `"$statusEval`" 2>/dev/null"
+$rsStatus = Invoke-RemoteCommand -Ip $bootstrapIp -Command "sudo mongosh --quiet $tlsArgs $sysAuth --host 127.0.0.1:27017 --eval `"$statusEval`" 2>/dev/null"
 
+# `\s*$` allows trailing CR (SSH pipes through CRLF; `$` alone in multiline
+# mode matches just before `\n`, leaving `\r` unmatched). Same lesson as
+# the role-overlay-mongo-rs-initiate.tf fix, surfaced at 0.G.2 first
+# ratification 2026-05-17.
 Test-Check -Description "rs.status() shows 1 PRIMARY" -Probe {
-    $rsStatus -match '(?m)^PRIMARY=1$'
+    $rsStatus -match '(?m)^PRIMARY=1\s*$'
 } | Out-Null
 
 Test-Check -Description "rs.status() shows 2 SECONDARY" -Probe {
-    $rsStatus -match '(?m)^SECONDARY=2$'
+    $rsStatus -match '(?m)^SECONDARY=2\s*$'
 } | Out-Null
 
 Test-Check -Description "rs.status() shows 3 members all health:1" -Probe {
-    ($rsStatus -match '(?m)^HEALTH=3$') -and ($rsStatus -match '(?m)^MEMBERS=3$')
+    ($rsStatus -match '(?m)^HEALTH=3\s*$') -and ($rsStatus -match '(?m)^MEMBERS=3\s*$')
 } | Out-Null
 
 Test-Check -Description "rs.status().set == 'nexus-rs' (replica set name canonical)" -Probe {
+    $sysAuth = Get-SystemAuthArgs
     $setEval = "print(rs.status().set)"
-    $out = Invoke-RemoteCommand -Ip $bootstrapIp -Command "sudo mongosh --quiet $tlsArgs --host 127.0.0.1:27017 --eval `"$setEval`" 2>/dev/null"
+    $out = Invoke-RemoteCommand -Ip $bootstrapIp -Command "sudo mongosh --quiet $tlsArgs $sysAuth --host 127.0.0.1:27017 --eval `"$setEval`" 2>/dev/null"
     $out -match '^nexus-rs$'
 } | Out-Null
 
-Test-Check -Description "write/read round-trip: insert on PRIMARY -> read on SECONDARY via readPreference=secondary + readConcern=majority" -Probe {
+Test-Check -Description "write/read round-trip: insert on PRIMARY -> read on SECONDARY via readPreference=secondary + readConcern=majority (auth as smoke-rw)" -Probe {
+    # Read the smoke-rw password from mongo-1 (same value rendered on all 3
+    # nodes from KV nexus/oltp/mongo/smoke-user-password). 0400 root:mongodb
+    # so sudo required.
+    $smokePwd = Invoke-RemoteCommand -Ip $bootstrapIp -Command 'sudo cat /etc/nexus-mongo/smoke-user-password'
+    if (-not $smokePwd -or $smokePwd.Length -lt 16) { return $false }
+    $authArgs = "--username smoke-rw --password '$smokePwd' --authenticationDatabase admin"
+
     $token  = "smoke-0G2-$(Get-Random)-$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
-    $writeEval = "db.getSiblingDB('nexus_smoke').smoke_test.insertOne({_id:'smoke-key',token:'$token'}); print('WROTE')"
-    $writeOut = Invoke-RemoteCommand -Ip $bootstrapIp -Command "sudo mongosh --quiet $tlsArgs --host 127.0.0.1:27017 --eval `"$writeEval`" 2>&1"
-    # If smoke-key already exists from a prior smoke run, insertOne errors
-    # with DuplicateKey -- treat that as "previous round-trip succeeded;
-    # use an updateOne instead to refresh the token". Idempotent re-run.
+    # Write URI: routes to PRIMARY automatically (RS topology + default
+    # readPreference=primary). `--host 127.0.0.1` alone would write to the
+    # local mongod which may NOT be PRIMARY at this moment, causing "not
+    # primary" errors after RS re-elections.
+    $writeRsUri = "mongodb://$($nodeIps -join ':27017,'):27017/nexus_smoke?replicaSet=nexus-rs"
+    $writeEval = "db.smoke_test.insertOne({_id:'smoke-key',token:'$token'}); print('WROTE')"
+    $writeOut = Invoke-RemoteCommand -Ip $bootstrapIp -Command "sudo mongosh --quiet $tlsArgs $authArgs '$writeRsUri' --eval `"$writeEval`" 2>&1"
+    # Idempotent re-run: if smoke-key already exists from a prior smoke run,
+    # insertOne errors with DuplicateKey -> updateOne refreshes the token.
     if ($writeOut -notmatch 'WROTE') {
-        if ($writeOut -match 'DuplicateKey') {
-            $updateEval = "db.getSiblingDB('nexus_smoke').smoke_test.updateOne({_id:'smoke-key'},{`$set:{token:'$token'}}); print('UPDATED')"
-            $writeOut = Invoke-RemoteCommand -Ip $bootstrapIp -Command "sudo mongosh --quiet $tlsArgs --host 127.0.0.1:27017 --eval `"$updateEval`" 2>&1"
+        # MongoDB 8.0 mongosh emits "E11000 duplicate key error" on
+        # duplicate key (not "DuplicateKey" -- that's the codeName, not the
+        # message text).
+        if ($writeOut -match 'E11000|duplicate key') {
+            $updateEval = "db.smoke_test.updateOne({_id:'smoke-key'},{\`$set:{token:'$token'}}); print('UPDATED')"
+            $writeOut = Invoke-RemoteCommand -Ip $bootstrapIp -Command "sudo mongosh --quiet $tlsArgs $authArgs '$writeRsUri' --eval `"$updateEval`" 2>&1"
             if ($writeOut -notmatch 'UPDATED') { return $false }
         } else {
             return $false
         }
     }
-    # Read from a SECONDARY via the RS connection string.
-    $rsUri = "mongodb://${($nodeIps -join ':27017,')}:27017/nexus_smoke?replicaSet=nexus-rs&readPreference=secondary&readConcernLevel=majority"
+    # Read from a SECONDARY via the RS connection string + same auth.
+    $rsUri = "mongodb://$($nodeIps -join ':27017,'):27017/nexus_smoke?replicaSet=nexus-rs&readPreference=secondary&readConcernLevel=majority"
     $readEval = "var d=db.smoke_test.findOne({_id:'smoke-key'},{token:1,_id:0}); print('READ='+(d?d.token:'null'))"
     # Retry up to 10x with 2s between for replication catch-up.
     for ($i = 1; $i -le 10; $i++) {
-        $readOut = Invoke-RemoteCommand -Ip $bootstrapIp -Command "sudo mongosh --quiet $tlsArgs '$rsUri' --eval `"$readEval`" 2>&1"
+        $readOut = Invoke-RemoteCommand -Ip $bootstrapIp -Command "sudo mongosh --quiet $tlsArgs $authArgs '$rsUri' --eval `"$readEval`" 2>&1"
         if ($readOut -match "READ=$([regex]::Escape($token))") { return $true }
         Start-Sleep -Seconds 2
     }

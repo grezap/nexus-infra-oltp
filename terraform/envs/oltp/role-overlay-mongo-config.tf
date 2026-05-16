@@ -102,6 +102,14 @@ locals {
     "  fork: false",
     "  pidFilePath: /var/run/nexus-mongo/mongod.pid",
     "",
+    "# (NOTE: enableLocalhostAuthBypass tried at mongo_config_v=2 + reverted.",
+    "#  MongoDB 8.0 + security.keyFile + security.authorization=enabled does",
+    "#  NOT activate the localhost-exception even when the setParameter is",
+    "#  set. The bypass parameter loads into config but the runtime check",
+    "#  still requires auth. The rs-initiate overlay now uses __system",
+    "#  cluster auth via the keyFile content to bootstrap smoke-rw -- see",
+    "#  role-overlay-mongo-rs-initiate.tf v5 + handbook §3.x.)",
+    "",
   ])
 }
 
@@ -112,7 +120,7 @@ resource "null_resource" "mongo_config" {
     tls_id         = null_resource.mongo_tls[each.key].id
     vmnet11        = each.value.vmnet11
     conf_sha       = sha256(local.mongo_conf_rendered)
-    mongo_config_v = "1" # v1 (0.G.2) = initial straight-to-mTLS config + keyFile RS internal auth + WT cacheSizeGB=0.5 for lab 2 GB nodes.
+    mongo_config_v = "3" # v3 (0.G.2 ratification fix 2026-05-17, second iter) = reverted v2's enableLocalhostAuthBypass setParameter. MongoDB 8.0 + security.keyFile + security.authorization=enabled does NOT activate the localhost-exception even when the bypass setParameter is set; the runtime check still requires auth. Diagnosed when createUser kept failing with "Unauthorized" despite the bypass being in the loaded config. Bootstrap now uses __system cluster auth via keyFile content (rs-initiate v5). v2 added the bypass (didn't work). v1 = initial straight-to-mTLS config.
 
     destroy_vm_ip    = each.value.vmnet11
     destroy_ssh_user = var.oltp_node_user

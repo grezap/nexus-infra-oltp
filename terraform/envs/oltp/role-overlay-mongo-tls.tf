@@ -80,7 +80,7 @@ resource "null_resource" "mongo_tls" {
     pki_role_name = var.vault_pki_mongo_role_name
     vmnet10       = each.value.vmnet10
     vmnet11       = each.value.vmnet11
-    mongo_tls_v   = "1" # v1 (0.G.2) = initial straight-to-mTLS render. server.pem (combined leaf+PKCS#8 key per mongod's --tlsCertificateKeyFile shape) + ca.crt (intermediate+root per the 0.G.1 OpenSSL-strict-verify lesson) + keyfile (1024-char base64 from KV nexus/oltp/mongo/keyfile for RS internal auth).
+    mongo_tls_v   = "2" # v2 (0.G.2 ratification fix 2026-05-17) = +3rd template stanza renders /etc/nexus-mongo/smoke-user-password from KV nexus/oltp/mongo/smoke-user-password (sticky-seeded by nexus-infra-vmware security env's role-overlay-vault-mongo-smoke-user-seed.tf). Used by the rs-initiate overlay to create the smoke-rw RBAC user + by the smoke gate to auth as that user. v1 = initial straight-to-mTLS render with server.pem + ca.crt + keyfile only.
 
     destroy_vm_ip    = each.value.vmnet11
     destroy_ssh_user = var.oltp_node_user
@@ -225,8 +225,33 @@ EOT
 "@
       $vaKeyfileB64 = [Convert]::ToBase64String([System.Text.UTF8Encoding]::new($false).GetBytes(($vaKeyfileTemplate -replace "`r`n","`n")))
 
-      # Stage: install split + drop both templates + restart vault-agent +
-      # wait for both files + manual split.
+      # ─── 72-template-mongo-smoke-user-password.hcl ─── KV pull, no post-cmd ─
+      # 0.G.2 ratification fix: pulls the smoke-rw user's password from KV
+      # at nexus/oltp/mongo/smoke-user-password. Consumed by the rs-initiate
+      # overlay's createUser flow + by the smoke gate's auth.
+      $vaSmokePwdTemplate = @"
+# 72-template-mongo-smoke-user-password.hcl -- Phase 0.G.2 ratification fix.
+# Pulls the 32-char base64 smoke-rw user password from KV at
+# nexus/oltp/mongo/smoke-user-password (seeded by nexus-infra-vmware
+# security env's role-overlay-vault-mongo-smoke-user-seed.tf). Used by the
+# rs-initiate overlay to create the smoke-rw user during the localhost-
+# auth-bypass bootstrap window, and by the smoke gate to auth as that user.
+
+template {
+  contents = <<EOT
+{{- with secret `"nexus/data/oltp/mongo/smoke-user-password`" }}{{ .Data.data.content }}{{- end }}
+EOT
+
+  destination = "/etc/nexus-mongo/smoke-user-password"
+  perms       = "0400"
+  user        = "mongodb"
+  group       = "mongodb"
+}
+"@
+      $vaSmokePwdB64 = [Convert]::ToBase64String([System.Text.UTF8Encoding]::new($false).GetBytes(($vaSmokePwdTemplate -replace "`r`n","`n")))
+
+      # Stage: install split + drop all three templates + restart vault-agent +
+      # wait for all three files + manual split.
       $stage = @"
 set -euo pipefail
 
@@ -255,11 +280,17 @@ echo '$vaKeyfileB64' | base64 -d | sudo tee /etc/vault-agent/71-template-mongo-k
 sudo chown root:root /etc/vault-agent/71-template-mongo-keyfile.hcl
 sudo chmod 0644 /etc/vault-agent/71-template-mongo-keyfile.hcl
 
+echo '$vaSmokePwdB64' | base64 -d | sudo tee /etc/vault-agent/72-template-mongo-smoke-user-password.hcl > /dev/null
+sudo chown root:root /etc/vault-agent/72-template-mongo-smoke-user-password.hcl
+sudo chmod 0644 /etc/vault-agent/72-template-mongo-smoke-user-password.hcl
+
 sudo systemctl restart nexus-vault-agent.service
 
-# Wait for BOTH render targets, then manually invoke split.
+# Wait for ALL THREE render targets, then manually invoke split.
 for i in 1 2 3 4 5 6 7 8 9 10; do
-  if sudo test -s /etc/nexus-mongo/tls/bundle.pem && sudo test -s /etc/nexus-mongo/keyfile; then break; fi
+  if sudo test -s /etc/nexus-mongo/tls/bundle.pem \
+     && sudo test -s /etc/nexus-mongo/keyfile \
+     && sudo test -s /etc/nexus-mongo/smoke-user-password; then break; fi
   sleep 2
 done
 if ! sudo test -s /etc/nexus-mongo/tls/bundle.pem; then
@@ -269,6 +300,11 @@ if ! sudo test -s /etc/nexus-mongo/tls/bundle.pem; then
 fi
 if ! sudo test -s /etc/nexus-mongo/keyfile; then
   echo "[mongo-tls stage] ERROR: keyfile not rendered within 20s after vault-agent restart" >&2
+  sudo journalctl -u nexus-vault-agent.service --no-pager -n 20 >&2
+  exit 1
+fi
+if ! sudo test -s /etc/nexus-mongo/smoke-user-password; then
+  echo "[mongo-tls stage] ERROR: smoke-user-password not rendered within 20s after vault-agent restart" >&2
   sudo journalctl -u nexus-vault-agent.service --no-pager -n 20 >&2
   exit 1
 fi
@@ -282,20 +318,20 @@ echo STAGE_OK
         throw "[mongo-tls $hostName] cert + keyFile render stage failed (rc=$LASTEXITCODE)"
       }
 
-      # Verify cert files + keyFile + CN.
+      # Verify cert files + keyFile + smoke-user-password + CN.
       $deadline = (Get-Date).AddSeconds(60)
       $rendered = $false
       while ((Get-Date) -lt $deadline) {
-        $check = (ssh @sshOpts "$sshUser@$ip" "sudo test -s /etc/nexus-mongo/tls/server.pem && sudo test -s /etc/nexus-mongo/tls/ca.crt && sudo test -s /etc/nexus-mongo/keyfile && sudo openssl x509 -in /etc/nexus-mongo/tls/server.pem -noout -subject 2>/dev/null | grep -q '$cn' && echo OK" 2>&1 | Out-String).Trim()
+        $check = (ssh @sshOpts "$sshUser@$ip" "sudo test -s /etc/nexus-mongo/tls/server.pem && sudo test -s /etc/nexus-mongo/tls/ca.crt && sudo test -s /etc/nexus-mongo/keyfile && sudo test -s /etc/nexus-mongo/smoke-user-password && sudo openssl x509 -in /etc/nexus-mongo/tls/server.pem -noout -subject 2>/dev/null | grep -q '$cn' && echo OK" 2>&1 | Out-String).Trim()
         if ($check -match 'OK') { $rendered = $true; break }
         Start-Sleep -Seconds 3
       }
       if (-not $rendered) {
         $journal = (ssh @sshOpts "$sshUser@$ip" "sudo journalctl -u nexus-vault-agent.service --no-pager -n 40" 2>&1 | Out-String)
         Write-Host $journal
-        throw "[mongo-tls $hostName] cert+keyFile not rendered (CN=$cn) within 60s"
+        throw "[mongo-tls $hostName] cert+keyFile+smoke-pwd not rendered (CN=$cn) within 60s"
       }
-      Write-Host "[mongo-tls $hostName] rendered: server.pem (CN=$cn) + ca.crt (intermediate+root) + keyfile (1024-char base64)"
+      Write-Host "[mongo-tls $hostName] rendered: server.pem (CN=$cn) + ca.crt (intermediate+root) + keyfile (1024-char base64) + smoke-user-password (32-char)"
     PWSH
   }
 
@@ -307,8 +343,8 @@ echo STAGE_OK
       $vmIp     = '${self.triggers.destroy_vm_ip}'
       $sshUser  = '${self.triggers.destroy_ssh_user}'
       $sshOpts  = @('-o','ConnectTimeout=5','-o','BatchMode=yes','-o','StrictHostKeyChecking=no')
-      Write-Host "[mongo-tls destroy] $${hostName}: removing 70+71 templates + cert/keyfile + restarting vault-agent"
-      ssh @sshOpts "$sshUser@$vmIp" "sudo rm -f /etc/vault-agent/70-template-mongo-tls.hcl /etc/vault-agent/71-template-mongo-keyfile.hcl /etc/nexus-mongo/tls/bundle.pem /etc/nexus-mongo/tls/server.pem /etc/nexus-mongo/tls/ca.crt /etc/nexus-mongo/keyfile /etc/ssl/certs/mongo-ca.pem; sudo systemctl restart nexus-vault-agent.service 2>/dev/null" 2>$null
+      Write-Host "[mongo-tls destroy] $${hostName}: removing 70+71+72 templates + cert/keyfile/smoke-pwd + restarting vault-agent"
+      ssh @sshOpts "$sshUser@$vmIp" "sudo rm -f /etc/vault-agent/70-template-mongo-tls.hcl /etc/vault-agent/71-template-mongo-keyfile.hcl /etc/vault-agent/72-template-mongo-smoke-user-password.hcl /etc/nexus-mongo/tls/bundle.pem /etc/nexus-mongo/tls/server.pem /etc/nexus-mongo/tls/ca.crt /etc/nexus-mongo/keyfile /etc/nexus-mongo/smoke-user-password /etc/ssl/certs/mongo-ca.pem; sudo systemctl restart nexus-vault-agent.service 2>/dev/null" 2>$null
       exit 0
     PWSH
   }

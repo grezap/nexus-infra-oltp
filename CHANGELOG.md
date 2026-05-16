@@ -6,6 +6,33 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Verified + Fixed — Phase 0.G.2 ratification (2026-05-17)
+
+Live ratification cycle (foundation → security → packer build → oltp apply → smoke + 0.G.1 regression) **ALL GREEN end-to-end** after 7 iterations of the oltp apply path surfacing 7 distinct bugs / MongoDB-8.0 behavior changes. All fixes in TF + Packer + smoke. Cluster proven: 3-member RS `nexus-rs` live on mTLS + keyFile internal auth + smoke-rw SCRAM RBAC user + write/read round-trip via `readPreference=secondary` + `readConcern=majority`.
+
+**7 transients surfaced + fixed in this commit:**
+
+1. **PowerShell regex `(?m)^FOO=N$` doesn't match SSH-piped CRLF**. `$` end-of-line anchor matches before `\n` only — `\r` between value and newline blocks the match. Fix: `(?m)^FOO=N\s*$` (allow trailing whitespace incl. CR). Applied across all 4 status-summary regexes in rs-initiate + smoke. (rs-initiate v1 → v2.)
+2. **MongoDB 8.0 protected-mode-equivalent**: tried `setParameter.enableLocalhostAuthBypass=true` in mongod.conf — does NOT activate the localhost-exception when `security.keyFile` + `security.authorization=enabled` are set. The bypass parameter loads but the runtime check still requires auth. (mongo_config_v=2 added, v=3 reverted with comment.)
+3. **`__system` cluster auth as the bootstrap path**: keyFile-derived internal user, root-equivalent privs, authenticatable via `--username __system --password $(cat /etc/nexus-mongo/keyfile) --authenticationDatabase local --authenticationMechanism SCRAM-SHA-256`. Pragmatic + works. Used for the one-shot `createUser smoke-rw` bootstrap. (rs-initiate v3 → v5.)
+4. **Probe-via-getUser broken**: `db.getSiblingDB('admin').getUser('smoke-rw')` requires admin privs which localhost-bypass does NOT grant (only allows `createUser` and a few specific commands). Fix: always-try `createUser` + catch the duplicate-user error. (rs-initiate v4.)
+5. **Writes need RS URI, not single `--host`**: RS can re-elect at any moment. A single-host write fails with `not primary` if that node isn't currently PRIMARY. Use `mongodb://mongo-1:27017,mongo-2:27017,mongo-3:27017/db?replicaSet=nexus-rs` for auto-routing. (rs-initiate v6 + smoke.)
+6. **`rs.status()` requires auth**: privilege `replSetGetStatus` is in `clusterAdmin`/`__system` roles. smoke-rw (readWrite only) doesn't have it. Fix: thread `__system` auth through all status probes in rs-initiate Stage 1+2 + smoke section 9. (rs-initiate v7.)
+7. **Bash `$set` variable expansion** inside the SSH double-quoted command envelope: PS `\`$set` produces `$set` literal for PS, but bash then re-expands inside the ssh command string, producing `{:{token:...}}` → mongosh syntax error. Fix: PS `\\`$set` emits `\$set` to bash, bash treats as literal `$set`. Also: mongosh 8.0 error message uses `E11000` / `duplicate key` (not `DuplicateKey` which is the codeName). Fix: `-match 'E11000|duplicate key'`. (rs-initiate v8 + smoke.)
+
+**Cumulative TF state**:
+- `nexus-infra-vmware/terraform/envs/security/role-overlay-vault-mongo-smoke-user-seed.tf` (NEW, ~112 LOC) — sticky-seeds 32-char base64 random password at `nexus/oltp/mongo/smoke-user-password`.
+- `nexus-infra-vmware/terraform/envs/security/role-overlay-vault-agent-mongo-policies.tf` v1 → v2 (+1 KV path grant on `nexus/data/oltp/mongo/smoke-user-password`).
+- `nexus-infra-vmware/terraform/envs/security/variables.tf` (+1 var `enable_mongo_smoke_user_seed`).
+- `nexus-infra-oltp/terraform/envs/oltp/role-overlay-mongo-tls.tf` v1 → v2 (+3rd Vault Agent template stanza rendering `/etc/nexus-mongo/smoke-user-password` from KV).
+- `nexus-infra-oltp/terraform/envs/oltp/role-overlay-mongo-config.tf` v1 → v3 (v2 added bypass setParameter, v3 reverted with comment explaining MongoDB 8.0 behavior).
+- `nexus-infra-oltp/terraform/envs/oltp/role-overlay-mongo-rs-initiate.tf` v1 → v8 (regex CRLF → __system bootstrap → always-try-createUser → RS URI writes → __system for rs.status → bash `$set` escape + E11000 message format).
+- `nexus-infra-oltp/scripts/smoke-0.G.2.ps1` — same fixes (3-7 above).
+
+**`docs/handbook.md` §3.x** gained 6 new MongoDB-specific recovery rows documenting each of the bugs/fixes. **§2 phase status row 0.G.2** flipped to ✅ PROVEN warm + cold-rebuild (2026-05-17).
+
+**Pushed commits unchanged**: this work is on top of `d7f6c35` (foundation 3a), `a7e08c7` (security 3b), `0d8e73b` (oltp TF 3c), `5ac2df8` (packer 3d), `e7e6914` (smoke + handbook 3e).
+
 ### Added — Phase 0.G.2 MongoDB Replica Set scaffolding (2026-05-17)
 
 Sub-phase 0.G.2 adds the 3-member MongoDB Replica Set `nexus-rs` alongside the 0.G.1 Redis Cluster. Pattern fully proven by 0.G.1 cold-rebuild; 0.G.2 ships smoother as a result. Scaffolding complete + smoke-tested clean; live ratification pending operator.
