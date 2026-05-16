@@ -4,14 +4,16 @@
 [![Terraform](https://img.shields.io/badge/Terraform-1.9+-purple)](https://www.terraform.io/)
 [![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![Blueprint](https://img.shields.io/badge/blueprint-nexus--platform--plan%20v0.1.3-orange)](https://github.com/grezap/nexus-platform-plan)
-[![Phase](https://img.shields.io/badge/phase-0.G%20in%20progress-yellow)](./CHANGELOG.md)
+[![Phase](https://img.shields.io/badge/phase-0.G.1%20scaffolding%20complete-yellow)](./CHANGELOG.md)
 [![Release](https://img.shields.io/badge/release-unreleased-lightgrey)](./CHANGELOG.md)
 
 OLTP data tier of the **NexusPlatform 66-VM lab** — Redis Cluster · MongoDB RS · Percona XtraDB Cluster + ProxySQL · PostgreSQL Patroni + etcd + HAProxy · SQL Server FCI + AG. 25 VMs across tiers `02-sqlserver` (4 Windows) + `05-oltp` (21 Linux).
 
 > **Canon:** This repo implements [Phase 0.G](https://github.com/grezap/nexus-platform-plan/blob/main/MASTER-PLAN.md) (line 159) of the NexusPlatform blueprint. VM inventory is `nexus-platform-plan/docs/infra/vms.yaml`. Architectural source of truth is [`nexus-platform-plan`](https://github.com/grezap/nexus-platform-plan).
 >
-> **➜ Want to rebuild the OLTP tier from zero?** [`docs/handbook.md`](./docs/handbook.md) is the operator canon. The body fills in as each sub-phase closes — this repo is currently at the **scaffold-only** state.
+> **➜ Want to rebuild the OLTP tier from zero?** [`docs/handbook.md`](./docs/handbook.md) is the operator canon. The body fills in as each sub-phase closes.
+>
+> **Phase 0.G.1 status (2026-05-17):** Redis Cluster TF + Packer + smoke-gate scaffolding complete. Apply-chain (foundation → security → oltp) is ready; awaiting operator's first `packer build` (~30-40 min) + `oltp.ps1 apply` + `oltp.ps1 smoke -Phase 0.G.1` cycle to ratify the cold-rebuild canon. See [`docs/handbook.md` §1.1-§1.4](./docs/handbook.md).
 
 ## Status
 
@@ -19,7 +21,7 @@ Phase 0.G in progress. Each sub-phase pairs a cluster bring-up with a `nexus-cli
 
 | Sub-phase | Cluster | VMs | nexus-cli release | Status |
 |---|---|---|---|---|
-| 0.G.1 | Redis Cluster | 6 (3 primaries + 3 replicas) | v0.6.0 RedisAdapter | scaffold |
+| 0.G.1 | Redis Cluster | 6 (3 primaries + 3 replicas) | v0.6.0 RedisAdapter | TF + Packer + smoke gate complete; awaiting first build/apply |
 | 0.G.2 | MongoDB RS | 3 | v0.6.1 MongoAdapter | TBD |
 | 0.G.3 | Percona PXC + ProxySQL | 5 (3 PXC + 2 ProxySQL) | v0.6.2 PerconaAdapter | TBD |
 | 0.G.4 | PostgreSQL Patroni + etcd + HAProxy | 7 (3 PG + 3 etcd + 1 HAProxy) | v0.6.3 PatroniAdapter | TBD |
@@ -56,7 +58,7 @@ Every cluster in this repo gets 13 verb groups via [`grezap/nexus-cli`](https://
 
 ## Quick links
 
-- **Operator handbook:** [`docs/handbook.md`](./docs/handbook.md) (scaffold-only; populated as sub-phases ship)
+- **Operator handbook:** [`docs/handbook.md`](./docs/handbook.md) (0.G.1 fully populated; §3.1 cold-rebuild canon aspirational pending live ratification)
 - **Per-sub-phase verification:** [`docs/verification/`](./docs/verification/) (populated as smoke gates pass)
 - **Architectural decisions:** [`docs/adr/`](./docs/adr/) (cluster-specific ADRs land per sub-phase)
 - **Cross-tier setup index:** [`nexus-platform-plan/docs/setup-guides.md`](https://github.com/grezap/nexus-platform-plan/blob/main/docs/setup-guides.md)
