@@ -1,0 +1,24 @@
+# ansible-lint config for nexus-infra-oltp.
+#
+# The oltp-node Packer template is a multi-DB image: one VM template can
+# host redis, mongo, percona, or patroni depending on which role gets
+# selected at provision time. Host-level config (data_dir, log_dir, run
+# user/group, distro pkg names, etc.) is intentionally SHARED across all
+# DB roles under a single tier namespace -- `oltp_node_*` -- rather than
+# duplicated per role (`oltp_redis_data_dir` + `oltp_mongo_data_dir` +
+# `oltp_percona_data_dir` ...). The `oltp_node_*` prefix IS the
+# namespace; it just happens to span the role boundary by design.
+#
+# var-naming[no-role-prefix] enforces the opposite pattern (every
+# var inside a role must be prefixed with that role's name). That's
+# the right rule for general-purpose reusable roles published to Galaxy
+# -- it's the wrong rule for internal Packer per-tier roles sharing a
+# tier-level namespace. Disabling it here.
+#
+# Service-specific vars still get the role-name prefix (e.g.
+# `oltp_redis_port`, `oltp_mongo_replset_name`), so the role-prefix
+# discipline is still enforced for the things that matter -- per-DB
+# settings -- just not for the tier-shared host-level basics.
+
+skip_list:
+  - var-naming[no-role-prefix]
