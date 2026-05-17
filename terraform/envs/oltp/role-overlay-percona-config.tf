@@ -107,7 +107,7 @@ resource "null_resource" "percona_config" {
     vmnet11          = each.value.vmnet11
     server_id        = each.value.server_id
     cluster_address  = local.percona_cluster_address
-    percona_config_v = "1" # v1 (0.G.3) = initial two-file (my.cnf + wsrep.cnf) split per Percona convention. mTLS-only on 3306. Galera over VMnet10 backplane. Service start is owned by chunk 3c galera-bootstrap.
+    percona_config_v = "4" # v4 (0.G.3 ratification fix 2026-05-18, 3rd iter) = REMOVED the mysqld --validate-config smoke. On PXC (not vanilla MySQL), --validate-config tries to ACTIVATE wsrep + connect to gcomm:// peers (which aren't bootstrapped yet) -> times out + fails -> chunk 3b errors. The chunk 3c galera-bootstrap probe + actual cluster formation are the real verification. v3 = trailing newline on my.cnf. v2 = !include wsrep.cnf added. v1 = initial two-file split (orphaned wsrep.cnf -- bug).
 
     destroy_vm_ip    = each.value.vmnet11
     destroy_ssh_user = var.oltp_node_user
@@ -177,6 +177,24 @@ pxc_strict_mode                 = ENFORCING
 [client]
 socket                          = /var/run/nexus-percona/mysqld.sock
 ssl-ca                          = /etc/nexus-percona/tls/ca.pem
+
+# Pull in the per-host Galera/wsrep config (rendered as wsrep.cnf below).
+# Without this !include, mysqld with --defaults-file=/etc/nexus-percona/my.cnf
+# reads ONLY my.cnf and the wsrep_provider directive is never loaded ->
+# mysqld starts in standalone mode (no Galera) -> chunk 3c bootstrap probe
+# fails because wsrep_cluster_size is not a defined variable. Caught at
+# 0.G.3 first ratification 2026-05-17. Chunk 3c's runtime `!include sst-
+# auth.cnf` goes INTO wsrep.cnf, so this transitive include picks it up too.
+#
+# CRITICAL: the file MUST end with a trailing newline. MySQL's `!include`
+# parser strips the last character of every line under the assumption it's
+# `\n`. If the file lacks a trailing LF, the last char of the last line
+# (the `f` in `wsrep.cnf`) gets eaten -> mysqld tries to open `wsrep.cn`
+# and fails with `Can't get stat of '/etc/nexus-percona/wsrep.cn'`.
+# Trailing blank line before the closing `"@` adds the LF. Caught at
+# 0.G.3 ratification 2026-05-18.
+!include /etc/nexus-percona/wsrep.cnf
+
 "@
 
       # ─── wsrep.cnf: Galera-specific (per-host node identity) ─────────────
@@ -247,14 +265,15 @@ echo '$wsrepCnfB64' | base64 -d | sudo tee /etc/nexus-percona/wsrep.cnf > /dev/n
 sudo chown root:mysql /etc/nexus-percona/wsrep.cnf
 sudo chmod 0644 /etc/nexus-percona/wsrep.cnf
 
-# Validate the config parses cleanly (mysqld --validate-config). This catches
-# typos / unknown directives BEFORE chunk 3c tries to start the daemon.
-# --defaults-file points at our my.cnf; --no-defaults disables system /etc/
-# my.cnf precedence so we test EXACTLY our rendered file.
-if ! sudo mysqld --defaults-file=/etc/nexus-percona/my.cnf --validate-config 2>&1; then
-  echo "[percona-config stage] ERROR: mysqld --validate-config failed on rendered my.cnf" >&2
-  exit 1
-fi
+# Note: NO `mysqld --validate-config` smoke here. On Percona XtraDB Cluster
+# (vs vanilla MySQL), --validate-config tries to ACTIVATE the wsrep provider
+# (including a Galera connection attempt to gcomm:// peers). Since the
+# cluster isn't bootstrapped yet at this point in the apply graph, the
+# connect attempt times out + validate-config returns non-zero with
+# `[Galera] gcs connect failed: Operation timed out`. The validate step
+# turns out to be a bad fit for PXC. Chunk 3c galera-bootstrap's
+# `mysql -e 'SELECT 1'` probe + the actual cluster formation are the real
+# verification. Caught at 0.G.3 ratification 2026-05-18.
 
 echo CONFIG_OK
 "@

@@ -46,6 +46,18 @@ variable "mongodb_version" {
   description = "MongoDB major version (X.Y) installed from the MongoDB vendor APT repo. Default 8.0 because MongoDB's 7.0 APT repo only goes through bookworm (Debian 12); the trixie (Debian 13) repo path is `mongodb-org/8.0`. Forcing 7.0 forward-compat onto trixie risks libstdc++ ABI mismatches. 8.0 is GA + supports trixie natively + is wire-compatible with 7.0 clients for our usage (rs.initiate / TLS / keyFile auth unchanged). Pin to specific X.Y.Z by passing -var mongodb_version=8.0.x at packer build time."
 }
 
+variable "pxc_version" {
+  type        = string
+  default     = "8.0"
+  description = "Percona XtraDB Cluster major version (X.Y) installed via the Percona vendor APT repo (percona-release setup pxc-80). Default 8.0 (current GA). The percona-release helper enables the right sub-repos (pxc-80 + tools-80 + ps-80); changing this requires also updating the oltp_pxc Ansible role's apt source to call `percona-release setup pxc-XX` with the new major."
+}
+
+variable "proxysql_version" {
+  type        = string
+  default     = "2.6"
+  description = "ProxySQL major.minor (X.Y) installed via the ProxySQL vendor APT repo at repo.proxysql.com. Default 2.6 (current stable). v2.x is required for the mysql_galera_hostgroups feature; v1.x doesn't support galera-aware routing. The repo URL bakes the minor (proxysql-{X.Y}.x/debian), so a bump requires also updating the oltp_proxysql Ansible role's apt source."
+}
+
 variable "cpus" {
   type        = number
   default     = 2

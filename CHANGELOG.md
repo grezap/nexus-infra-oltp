@@ -6,6 +6,55 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — Phase 0.G.3 (Percona XtraDB Cluster + ProxySQL, 5 nodes) — scaffolding complete; ratification deferred to 0.G.3.5 refactor (2026-05-18)
+
+**Ratification status (honest):** Live ratification cycle hit **16 transients** across 7 Packer builds + 6 oltp apply iterations + a manual redis CLUSTER RESET HARD recovery. Each transient was diagnosed + fixed (with code changes baked into the chunk 3 overlays + the oltp_pxc Ansible role + the chunk 4 Packer template). Transient #16 (joiner SST didn't reach Synced) stopped converging — the monolithic `envs/oltp/` + `oltp-node.vmx` design's 30-min full-tree iteration loop made each new SST debug attempt too slow + each fix in percona kept cascading to redis/mongo state.
+
+**Pivoted to Phase 0.G.3.5 refactor** per `memory/feedback_per_cluster_state_per_engine_template.md`: split monolithic oltp into per-engine Packer templates (oltp-redis-node + oltp-mongo-node + oltp-pxc-node + oltp-proxysql-node) + per-cluster Terraform envs (envs/oltp-redis + envs/oltp-mongo + envs/oltp-percona). The refactor:
+- **Shrinks iteration loop from 30 min → 5 min** (per-cluster apply touches only that cluster's VMs)
+- **Eliminates cascade replacement** between clusters (each has its own state)
+- **Carries forward all 16 transient lessons** baked into the per-engine templates + per-cluster overlays
+- **Verified by existing smoke gates** (smoke-0.G.1/2/3.ps1 are the regression test bed)
+
+All 16 transients are documented in `docs/handbook.md` §3.x with symptom → diagnosis → fix.
+
+
+
+5-node OLTP cluster: 3 PXC (Galera-replicated MySQL data plane, mTLS-only on :3306, Galera SST/IST over VMnet10 backplane via xtrabackup-v2) + 2 ProxySQL (galera-aware connection pooler + load balancer on :6033, admin :6032, VRRP-floated VIP `192.168.70.50` between proxysql-1 MASTER candidate / proxysql-2 BACKUP). 4 sub-chunks across chunk 3 + chunk 4 + chunk 5 + a chunk 4 lint fix:
+
+**chunk 3a — oltp env scaffolding** ([commit 289f214](https://github.com/grezap/nexus-infra-oltp/commit/289f214)):
+- `terraform/envs/oltp/main.tf`: +5 module.vm blocks (pxc-node-1/2/3 + proxysql-1/2) reading the canonical MACs from the foundation overlay (`00:50:56:3F:00:79-7D`).
+- `terraform/envs/oltp/variables.tf`: +25 vars (5 per-VM toggles · 10 MAC vars · 1 master vault-agents toggle · 5 per-host vault-agent toggles · 4 overlay toggles · 3 cross-env coupling vars + VIP IP).
+- `terraform/envs/oltp/role-overlay-oltp-nftables-backplane.tf` v2 → **v3**: +5 percona node IPs to push set, +3306 (MySQL), +6032/6033 (ProxySQL admin + frontend), +VRRP protocol 112 unicast/multicast accept rules. Galera SST/IST ports 4444/4567/4568 covered by existing VMnet10 whole-segment trust.
+- `terraform/envs/oltp/role-overlay-percona-vault-agents.tf` (NEW, ~290 LOC): 5-host port of `role-overlay-mongo-vault-agents.tf` with `oltp-percona-` sidecar prefix.
+
+**chunk 3b — TLS overlay + percona-config** ([commit 6e744a5](https://github.com/grezap/nexus-infra-oltp/commit/6e744a5)):
+- `terraform/envs/oltp/role-overlay-percona-tls.tf` (NEW, ~410 LOC): per-host PKI leaf + 3 KV cred renders via 4 Vault Agent template stanzas (70-tls + 71-cluster-password + 72-monitor-password + role-dependent 73-root-password OR 73-proxysql-admin-password). Split script breaks bundle.pem into 3 files (server-cert + server-key + ca) -- MySQL + ProxySQL both require 3 separate `ssl-*` directives, vs mongo's combined .pem. PKCS#8 key (lab convention). ProxySQL nodes include VIP .50 in IP SANs so handshakes against the floating VIP validate regardless of which node holds it.
+- `terraform/envs/oltp/role-overlay-percona-config.tf` (NEW, ~270 LOC): per-host PXC-only render of /etc/nexus-percona/{my,wsrep}.cnf. Two-file split per Percona convention. mTLS-only on 3306, `require_secure_transport=ON`. Galera over VMnet10 backplane with `wsrep_cluster_address` listing all 3 PXC backplane IPs, `wsrep_sst_method=xtrabackup-v2`, `pxc_strict_mode=ENFORCING`, `pxc-encrypt-cluster-traffic=ON`. `mysqld --validate-config` clean-check before reporting success. Service start NOT triggered here -- chunk 3c owns mysql.service lifecycle.
+- Fix: escaped `${1:-mysql}` → `$${1:-mysql}` in the bash split script's positional-arg-with-default (Terraform heredoc interpolation lesson, per `memory/feedback_terraform_heredoc_powershell.md`).
+
+**chunk 3c — galera-cluster-bootstrap** ([commit 9eb1a29](https://github.com/grezap/nexus-infra-oltp/commit/9eb1a29)) — the tricky one:
+- `terraform/envs/oltp/role-overlay-percona-galera-bootstrap.tf` (NEW, ~370 LOC): probe-then-bootstrap with idempotent re-apply. Stage 1 probe via `SHOW STATUS LIKE 'wsrep_cluster_size'` from any active PXC node. If cluster exists, skip bootstrap dance (verification still runs). Otherwise: stop both services on all 3 PXC nodes → start `nexus-percona-bootstrap.service` on pxc-node-1 (--wsrep-new-cluster) → wait for socket → ALTER root password + CREATE wsrep_sst/clustercheck/smoke-rw users with grants → write `/etc/nexus-percona/sst-auth.cnf` (0640 root:mysql) on all 3 nodes with idempotent `!include` to wsrep.cnf → stop bootstrap unit on pxc-node-1 + start regular nexus-percona.service → wait Synced → sequential SST joiner start (pxc-node-2 then pxc-node-3, each waiting for own Synced + cluster size increment).
+- Verification (PXC exit gate): wsrep_cluster_size=3 on bootstrap node · wsrep_local_state_comment=Synced on all 3 · wsrep_cluster_status=Primary on all 3 · write/read round-trip via smoke-rw + mTLS (insert on pxc-node-1 with ON DUPLICATE KEY UPDATE for idempotency, SELECT on pxc-node-2 + pxc-node-3 returns the token).
+- smoke-rw password derived deterministically from cluster-password (`smoke-` + first 24 chars) -- forward-compat for a future smoke-rw-password sticky-seed.
+- `terraform/envs/oltp/outputs.tf`: +percona_endpoints output (pxc + proxysql per-node IPs with both VMnet11 service + VMnet10 backplane addresses; MySQL/Galera/ProxySQL ports; cluster_name; VIP). next_step updated.
+
+**chunk 3d — ProxySQL config + keepalived VRRP** ([commit 8b23c07](https://github.com/grezap/nexus-infra-oltp/commit/8b23c07)):
+- `terraform/envs/oltp/role-overlay-proxysql-config.tf` (NEW, ~270 LOC): per-host (2 ProxySQL only) /etc/proxysql.cnf render + nexus-proxysql.service start + backend convergence verify. Galera-aware mysql_galera_hostgroups (writer=10, backup_writer=20, reader=30, offline=40 with max_writers=1, writer_is_also_reader=0). mysql_servers populates ALL 3 PXC nodes in hostgroup 10; Galera plugin auto-shuffles at runtime via the clustercheck user. p2s mTLS (ProxySQL <-> PXC backends) sharing the same cert set. Re-apply behavior: wipes runtime SQLite to force re-load from cnf (cnf is source of truth; runtime-edits via :6032 don't survive re-apply).
+- `terraform/envs/oltp/role-overlay-proxysql-keepalived.tf` (NEW, ~250 LOC): VRRP VIP .50 failover between proxysql-1 (priority 110 MASTER candidate) and proxysql-2 (priority 100 BACKUP). vrrp_instance VI_PROXYSQL_NEXUS, virtual_router_id 51, advert_int 1s, preempt_delay 5s, AH auth (8-char password derived from cluster-password truncate). /etc/keepalived/check_proxysql.sh (0700 root): 2-check systemctl is-active + mysql SELECT 1 via :6033 as smoke-rw. 3 consecutive failures → weight -30 → priority drops below proxysql-2's 100 → VIP flips within ~1s.
+
+**chunk 4 — oltp-node Packer extension** ([commit 13aa52d](https://github.com/grezap/nexus-infra-oltp/commit/13aa52d) + lint fix [90faabb](https://github.com/grezap/nexus-infra-oltp/commit/90faabb)):
+- `packer/oltp-node/ansible/roles/oltp_pxc/` (NEW, 4 files): Percona vendor APT setup via `percona-release setup pxc-80` with trixie→bookworm pin (Percona doesn't ship trixie yet); apt install percona-xtradb-cluster-server + percona-xtradb-cluster-client + percona-xtrabackup-80 + socat + rsync + qpress; stop+disable+mask `mysql.service` + `mysql@bootstrap.service` (apt-installed; would race ours + auto-bootstrap a junk cluster); 4 nexus-percona dirs; install + DISABLED `nexus-percona.service` + `nexus-percona-bootstrap.service` systemd units.
+- `packer/oltp-node/ansible/roles/oltp_proxysql/` (NEW, 4 files): ProxySQL vendor APT (repo.proxysql.com pinned to proxysql-2.6.x/debian/bookworm); apt install proxysql2 + keepalived; stop+disable+mask apt-shipped proxysql.service + disable keepalived.service at bake (TF chunk 3d enables per-host on the 2 ProxySQL nodes only); install + DISABLED `nexus-proxysql.service` systemd unit.
+- `packer/oltp-node/ansible/roles/oltp_redis/files/oltp-node-firstboot.sh`: IP→hostname→CLUSTER map extended with 5 percona-tier IPs (.51-.55 → pxc-node-{1,2,3} + proxysql-{1,2}, CLUSTER=percona, ROLE=pxc/proxysql) + CLUSTER → IDENTITY_DIR/GROUP map extended with `percona: /etc/nexus-percona / mysql`.
+- `packer/oltp-node/ansible/playbook.yml`: +2 vars passthrough + +2 roles in the list (oltp_pxc + oltp_proxysql).
+- Lint fix (commit 90faabb): 4 ansible-lint violations -- name[casing] x2 ("apt-get..." → "Apt-get..."), yaml[line-length] (169 chars on debug msg → hoisted to vars: with folded scalar `>-`), no-handler (`when: percona_pin.changed` → unconditional cache refresh; handlers run at end-of-play, too late for the immediately-following install task).
+
+**chunk 5 — close-out** (this commit):
+- `scripts/smoke-0.G.3.ps1` (NEW, ~330 LOC): 12 sections (reachability x5 · firstboot x5 · identity x5 with role differentiation · vault-agent x5 + token sink · TLS material 3-file split + 3 KV creds with role-dependent 3rd · PXC config my.cnf + wsrep.cnf + sst-auth.cnf include · ProxySQL config + admin :6032 + galera_hostgroups · services per role · Galera cluster shape size=3/Synced/Primary · VIP .50 bound on MASTER + not-bound on BACKUP · end-to-end via VIP write + read from each PXC backend · regression: 0.G.1 redis + 0.G.2 mongo still active).
+- `docs/handbook.md`: §0 prereqs extended with v3 dhcp + percona Vault state; §1.1 packer build time bumped to 40-55 min + expanded spot-check; §1.2 cross-env order extended with 0.G.3 sidecars; §1.3 apply breakdown +percona row; §1.5 +5 0.G.3 -Vars examples; §2 phase table flipped 0.G.3 from "not started" → "scaffolding complete + ratification documented"; §3.x +2 lint-time transient rows.
+- `README.md`: phase badge "0.G.1 + 0.G.2 both proven" → "0.G.1 + 0.G.2 proven · 0.G.3 scaffolding complete"; sub-phase table 0.G.3 row updated.
+
 ### Verified + Fixed — Phase 0.G.2 ratification (2026-05-17)
 
 Live ratification cycle (foundation → security → packer build → oltp apply → smoke + 0.G.1 regression) **ALL GREEN end-to-end** after 7 iterations of the oltp apply path surfacing 7 distinct bugs / MongoDB-8.0 behavior changes. All fixes in TF + Packer + smoke. Cluster proven: 3-member RS `nexus-rs` live on mTLS + keyFile internal auth + smoke-rw SCRAM RBAC user + write/read round-trip via `readPreference=secondary` + `readConcern=majority`.

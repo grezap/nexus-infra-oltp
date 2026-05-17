@@ -102,7 +102,7 @@ resource "null_resource" "percona_galera_bootstrap" {
     ])
     pxc_members        = jsonencode(local.percona_pxc_members)
     bootstrap_ip       = local.percona_bootstrap_ip
-    galera_bootstrap_v = "1" # v1 (0.G.3) = initial 3-node Galera bootstrap + wsrep_sst + clustercheck + smoke-rw users + sst-auth.cnf include + write/read round-trip across all 3 nodes.
+    galera_bootstrap_v = "3" # v3 (0.G.3 ratification fix 2026-05-18, 2nd structural fix) = corrected bootstrap-vs-join ordering. v2 had nexus-percona-bootstrap.service stopped + regular nexus-percona.service started on pxc-node-1 BEFORE joiners came up; Galera in regular mode couldn't form primary view (no peers responding), entered systemd restart loop. v3 keeps bootstrap.service running on node-1 until joiners join, then rolling-restarts node-1 from bootstrap.service to regular service (now it has peers + can join). v2 was the mysql auth wrapper fix. v1 = initial.
   }
 
   depends_on = [null_resource.percona_config]
@@ -132,7 +132,7 @@ resource "null_resource" "percona_galera_bootstrap" {
       foreach ($ip in $allIps) {
         $isActive = (ssh @sshOpts "$sshUser@$ip" "systemctl is-active nexus-percona.service 2>/dev/null" | Out-String).Trim()
         if ($isActive -ne 'active') { continue }
-        $sizeOut = (ssh @sshOpts "$sshUser@$ip" "sudo mysql --defaults-file=/etc/nexus-percona/my.cnf -BNe `"SHOW STATUS LIKE 'wsrep_cluster_size'`" 2>/dev/null" | Out-String).Trim()
+        $sizeOut = (ssh @sshOpts "$sshUser@$ip" "sudo /usr/local/sbin/nexus-pxc-mysql -BNe `"SHOW STATUS LIKE 'wsrep_cluster_size'`" 2>/dev/null" | Out-String).Trim()
         # Output is `wsrep_cluster_size\t<N>`; extract the integer.
         if ($sizeOut -match 'wsrep_cluster_size\s+(\d+)') {
           $existingSize = [int]$matches[1]
@@ -163,11 +163,16 @@ resource "null_resource" "percona_galera_bootstrap" {
         }
 
         # ─── Step 3: wait for mysqld ready (poll SELECT 1 via socket) ───
+        # /usr/local/sbin/nexus-pxc-mysql is an auth-mode-aware wrapper
+        # (handles both fresh-init passwordless root AND post-step-4
+        # KV-passworded root). Written by chunk 4 oltp_pxc Ansible role
+        # at template-bake time; defensively installed earlier in apply
+        # if missing.
         Write-Host "[galera-bootstrap] step 3: waiting for mysqld socket on $bootIp..."
         $readyDeadline = (Get-Date).AddMinutes($timeout)
         $ready = $false
         while ((Get-Date) -lt $readyDeadline) {
-          $sel = (ssh @sshOpts "$sshUser@$bootIp" "sudo mysql --defaults-file=/etc/nexus-percona/my.cnf -BNe 'SELECT 1' 2>/dev/null" | Out-String).Trim()
+          $sel = (ssh @sshOpts "$sshUser@$bootIp" "sudo /usr/local/sbin/nexus-pxc-mysql -BNe 'SELECT 1' 2>/dev/null" | Out-String).Trim()
           if ($sel -eq '1') { $ready = $true; break }
           Start-Sleep -Seconds 5
         }
@@ -223,7 +228,7 @@ SELECT 'USERS_OK' AS status;
           -replace '__SMOKE_RW_PWD__', $smokeRwPwd
         $sqlB64 = [Convert]::ToBase64String([System.Text.UTF8Encoding]::new($false).GetBytes(($sql -replace "`r`n","`n")))
 
-        $userOut = ssh @sshOpts "$sshUser@$bootIp" "echo '$sqlB64' | base64 -d | sudo mysql --defaults-file=/etc/nexus-percona/my.cnf 2>&1" | Out-String
+        $userOut = ssh @sshOpts "$sshUser@$bootIp" "echo '$sqlB64' | base64 -d | sudo /usr/local/sbin/nexus-pxc-mysql 2>&1" | Out-String
         if ($userOut -notmatch 'USERS_OK') {
           Write-Host $userOut.Trim()
           throw "[galera-bootstrap] user-create batch on $bootIp did not return USERS_OK"
@@ -257,44 +262,41 @@ echo SST_AUTH_OK
           }
         }
 
-        # ─── Step 7: stop bootstrap service on pxc-node-1 ──────────────
-        Write-Host "[galera-bootstrap] step 7: stopping nexus-percona-bootstrap.service on $bootIp..."
-        ssh @sshOpts "$sshUser@$bootIp" "sudo systemctl stop nexus-percona-bootstrap.service" 2>&1 | Out-Null
-        Start-Sleep -Seconds 3
+        # ─── Step 7: KEEP bootstrap.service running on pxc-node-1 ─────
+        # CORRECTED FLOW (per 0.G.3 ratification 2026-05-18 lesson):
+        # The original step 7+8+9 stopped bootstrap.service + started
+        # regular nexus-percona.service on pxc-node-1 BEFORE joiners came
+        # up. Galera in regular mode reads the canonical wsrep_cluster_
+        # address (gcomm://node-1,node-2,node-3) and tries to JOIN an
+        # existing cluster. With node-2/3 not yet running, it cannot
+        # form a primary view (`No nodes coming from primary view`),
+        # mysqld exits, systemd restart loops forever.
+        #
+        # Correct sequence: bootstrap node-1 stays UP as the seed. Start
+        # joiners (2, 3) -- they SST/IST from node-1 + form the cluster.
+        # Once size=3 + all Synced, ROLLING-RESTART node-1 (stop
+        # bootstrap.service, start nexus-percona.service); by then it
+        # has peers to join, so regular mode succeeds.
+        Write-Host "[galera-bootstrap] step 7: keeping nexus-percona-bootstrap.service running on $bootIp until joiners come up (corrected flow)"
 
-        # ─── Step 8 + 9: start regular service on pxc-node-1 + wait Synced ─
-        Write-Host "[galera-bootstrap] step 8: starting nexus-percona.service on $bootIp (canonical wsrep_cluster_address)..."
-        ssh @sshOpts "$sshUser@$bootIp" "sudo systemctl start nexus-percona.service" 2>&1 | Out-Null
-
-        Write-Host "[galera-bootstrap] step 9: waiting for $bootIp wsrep_local_state_comment=Synced..."
-        $syncedDeadline = (Get-Date).AddMinutes($timeout)
-        $bootSynced = $false
-        while ((Get-Date) -lt $syncedDeadline) {
-          $state = (ssh @sshOpts "$sshUser@$bootIp" "sudo mysql --defaults-file=/etc/nexus-percona/my.cnf -BNe `"SHOW STATUS LIKE 'wsrep_local_state_comment'`" 2>/dev/null" | Out-String).Trim()
-          if ($state -match 'wsrep_local_state_comment\s+Synced') { $bootSynced = $true; break }
-          Start-Sleep -Seconds 5
-        }
-        if (-not $bootSynced) {
-          $journal = (ssh @sshOpts "$sshUser@$bootIp" "sudo journalctl -u nexus-percona.service --no-pager -n 50" 2>&1 | Out-String)
-          Write-Host $journal
-          throw "[galera-bootstrap] $bootIp did not reach Synced within $timeout min"
-        }
-        Write-Host "[galera-bootstrap] $bootIp Synced (size=1)"
-
-        # ─── Step 10 + 11 + 12: start joiners sequentially, wait Synced ──
+        # ─── Step 8 + 9: start joiners sequentially, wait Synced ──────
+        # Joiners get the canonical wsrep_cluster_address (gcomm://all 3)
+        # + dial pxc-node-1 (which is up via bootstrap.service) for SST.
+        # First joiner SSTs from node-1; second joiner SSTs from either
+        # node-1 or node-2 (Galera picks).
         $joinerIdx = 1
         foreach ($jIp in $joinerIps) {
           $joinerIdx++
           $expectedSize = $joinerIdx
-          Write-Host "[galera-bootstrap] step 10/11/12: starting nexus-percona.service on joiner $jIp (expect SST from existing member)..."
+          Write-Host "[galera-bootstrap] step 8/9: starting nexus-percona.service on joiner $jIp (expect SST from existing member)..."
           ssh @sshOpts "$sshUser@$jIp" "sudo systemctl start nexus-percona.service" 2>&1 | Out-Null
 
           Write-Host "[galera-bootstrap] waiting for joiner $jIp Synced + cluster size=$expectedSize on $bootIp..."
           $joinDeadline = (Get-Date).AddMinutes($timeout)
           $joined = $false
           while ((Get-Date) -lt $joinDeadline) {
-            $jState = (ssh @sshOpts "$sshUser@$jIp" "sudo mysql --defaults-file=/etc/nexus-percona/my.cnf -BNe `"SHOW STATUS LIKE 'wsrep_local_state_comment'`" 2>/dev/null" | Out-String).Trim()
-            $cSize  = (ssh @sshOpts "$sshUser@$bootIp" "sudo mysql --defaults-file=/etc/nexus-percona/my.cnf -BNe `"SHOW STATUS LIKE 'wsrep_cluster_size'`" 2>/dev/null" | Out-String).Trim()
+            $jState = (ssh @sshOpts "$sshUser@$jIp" "sudo /usr/local/sbin/nexus-pxc-mysql -BNe `"SHOW STATUS LIKE 'wsrep_local_state_comment'`" 2>/dev/null" | Out-String).Trim()
+            $cSize  = (ssh @sshOpts "$sshUser@$bootIp" "sudo /usr/local/sbin/nexus-pxc-mysql -BNe `"SHOW STATUS LIKE 'wsrep_cluster_size'`" 2>/dev/null" | Out-String).Trim()
             if ($jState -match 'wsrep_local_state_comment\s+Synced' -and $cSize -match "wsrep_cluster_size\s+$expectedSize\s*$") {
               $joined = $true; break
             }
@@ -307,6 +309,30 @@ echo SST_AUTH_OK
           }
           Write-Host "[galera-bootstrap] joiner $jIp Synced (cluster size=$expectedSize)"
         }
+
+        # ─── Step 10: rolling-restart pxc-node-1 bootstrap -> regular ──
+        # Now cluster has 3 members (size 3 if both joiners present, else
+        # 2). pxc-node-1 can safely switch to regular service: it has at
+        # least one peer alive to join via gcomm://, so it'll re-join
+        # the existing cluster as a normal member (vs auto-bootstrapping
+        # a new one).
+        Write-Host "[galera-bootstrap] step 10: rolling-restart $bootIp from bootstrap.service to nexus-percona.service..."
+        ssh @sshOpts "$sshUser@$bootIp" "sudo systemctl stop nexus-percona-bootstrap.service && sudo systemctl start nexus-percona.service" 2>&1 | Out-Null
+
+        Write-Host "[galera-bootstrap] waiting for $bootIp wsrep_local_state_comment=Synced (post rolling-restart)..."
+        $rrDeadline = (Get-Date).AddMinutes($timeout)
+        $bootRR = $false
+        while ((Get-Date) -lt $rrDeadline) {
+          $state = (ssh @sshOpts "$sshUser@$bootIp" "sudo /usr/local/sbin/nexus-pxc-mysql -BNe `"SHOW STATUS LIKE 'wsrep_local_state_comment'`" 2>/dev/null" | Out-String).Trim()
+          if ($state -match 'wsrep_local_state_comment\s+Synced') { $bootRR = $true; break }
+          Start-Sleep -Seconds 5
+        }
+        if (-not $bootRR) {
+          $journal = (ssh @sshOpts "$sshUser@$bootIp" "sudo journalctl -u nexus-percona.service --no-pager -n 50" 2>&1 | Out-String)
+          Write-Host $journal
+          throw "[galera-bootstrap] $bootIp did not reach Synced after rolling-restart within $timeout min"
+        }
+        Write-Host "[galera-bootstrap] $bootIp Synced (post rolling-restart; cluster size now expected at $($joinerIps.Count + 1))"
       }
 
       # ─── Verification (the 0.G.3 PXC exit gate) ─────────────────────
@@ -315,7 +341,7 @@ echo SST_AUTH_OK
       $smokeRwPwd = "smoke-" + $clusterPwd.Substring(0, 24)
 
       # 1. cluster_size from bootstrap node
-      $sizeOut = (ssh @sshOpts "$sshUser@$bootIp" "sudo mysql --defaults-file=/etc/nexus-percona/my.cnf -BNe `"SHOW STATUS LIKE 'wsrep_cluster_size'`" 2>/dev/null" | Out-String).Trim()
+      $sizeOut = (ssh @sshOpts "$sshUser@$bootIp" "sudo /usr/local/sbin/nexus-pxc-mysql -BNe `"SHOW STATUS LIKE 'wsrep_cluster_size'`" 2>/dev/null" | Out-String).Trim()
       if ($sizeOut -notmatch 'wsrep_cluster_size\s+3\s*$') {
         throw "[galera-bootstrap] FAILED: wsrep_cluster_size != 3 on $bootIp (got: $sizeOut)"
       }
@@ -323,11 +349,11 @@ echo SST_AUTH_OK
 
       # 2. Synced + Primary on all 3
       foreach ($ip in $allIps) {
-        $state = (ssh @sshOpts "$sshUser@$ip" "sudo mysql --defaults-file=/etc/nexus-percona/my.cnf -BNe `"SHOW STATUS LIKE 'wsrep_local_state_comment'`" 2>/dev/null" | Out-String).Trim()
+        $state = (ssh @sshOpts "$sshUser@$ip" "sudo /usr/local/sbin/nexus-pxc-mysql -BNe `"SHOW STATUS LIKE 'wsrep_local_state_comment'`" 2>/dev/null" | Out-String).Trim()
         if ($state -notmatch 'wsrep_local_state_comment\s+Synced') {
           throw "[galera-bootstrap] FAILED: $ip wsrep_local_state_comment != Synced (got: $state)"
         }
-        $cstatus = (ssh @sshOpts "$sshUser@$ip" "sudo mysql --defaults-file=/etc/nexus-percona/my.cnf -BNe `"SHOW STATUS LIKE 'wsrep_cluster_status'`" 2>/dev/null" | Out-String).Trim()
+        $cstatus = (ssh @sshOpts "$sshUser@$ip" "sudo /usr/local/sbin/nexus-pxc-mysql -BNe `"SHOW STATUS LIKE 'wsrep_cluster_status'`" 2>/dev/null" | Out-String).Trim()
         if ($cstatus -notmatch 'wsrep_cluster_status\s+Primary') {
           throw "[galera-bootstrap] FAILED: $ip wsrep_cluster_status != Primary (got: $cstatus)"
         }

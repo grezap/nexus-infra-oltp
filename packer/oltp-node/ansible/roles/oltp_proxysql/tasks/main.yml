@@ -41,13 +41,19 @@
   args:
     creates: /etc/apt/keyrings/proxysql.gpg
 
-- name: Add ProxySQL vendor APT repository
+- name: Add ProxySQL vendor APT repository (flat repo; codename in path, suite is './')
   ansible.builtin.copy:
     dest: /etc/apt/sources.list.d/proxysql.list
+    # ProxySQL repo uses a flat repo structure -- codename is in the URL
+    # path, the apt source uses `./` as the suite. Probed via
+    # `curl https://repo.proxysql.com/ProxySQL/proxysql-2.6.x/bookworm/`
+    # which shows InRelease + Packages + the .debs at the path root (no
+    # dists/ subdir). The earlier guessed URL `.../debian/ bookworm main`
+    # is wrong; that path doesn't exist.
     content: >
       deb [arch=amd64 signed-by=/etc/apt/keyrings/proxysql.gpg]
-      https://repo.proxysql.com/ProxySQL/proxysql-{{ oltp_node_proxysql_version }}.x/debian/
-      bookworm main
+      https://repo.proxysql.com/ProxySQL/proxysql-{{ oltp_node_proxysql_version }}.x/bookworm/
+      ./
     owner: root
     group: root
     mode: '0644'

@@ -144,9 +144,13 @@ build {
     ]
   }
 
-  # Apply the shared nexus_* roles + the oltp_redis tail.
+  # Apply the shared nexus_* roles + the per-cluster oltp_* roles.
   # extra_arguments per-pair to avoid the shell-tokenization issue
   # documented in nexus-infra-swarm-nomad/packer/swarm-node/swarm-node.pkr.hcl.
+  # role_paths MUST list every role the playbook references -- the ansible-
+  # local provisioner only uploads what's enumerated here (a missing entry
+  # surfaces at apply time as `the role 'X' was not found in /tmp/packer-
+  # provisioner-ansible-local/.../roles:...`).
   provisioner "ansible-local" {
     playbook_file = "ansible/playbook.yml"
     role_paths = [
@@ -156,11 +160,15 @@ build {
       "../_shared/ansible/roles/nexus_observability",
       "ansible/roles/oltp_redis",
       "ansible/roles/oltp_mongo",
+      "ansible/roles/oltp_pxc",       # 0.G.3 Percona XtraDB Cluster + Galera
+      "ansible/roles/oltp_proxysql",  # 0.G.3 ProxySQL + keepalived
     ]
     extra_arguments = [
       "--extra-vars", "target_user=${var.ssh_username}",
       "--extra-vars", "oltp_node_redis_version=${var.redis_version}",
       "--extra-vars", "oltp_node_mongodb_version=${var.mongodb_version}",
+      "--extra-vars", "oltp_node_pxc_version=${var.pxc_version}",
+      "--extra-vars", "oltp_node_proxysql_version=${var.proxysql_version}",
     ]
   }
 
@@ -178,29 +186,50 @@ build {
       "test -x /usr/bin/mongosh",
       "mongod --version | head -1",
       "mongosh --version",
-      # Both nexus-{redis,mongo}.service are INTENTIONALLY DISABLED at
-      # template time -- the template has no per-host identity yet.
-      # firstboot writes the identity env file; Terraform role-overlays
-      # render the per-cluster config + enable exactly one cluster's
-      # service per node. `systemctl cat` exits 0 if the unit file exists
-      # in any lookup path regardless of enable-state.
+      # 0.G.3 -- Percona XtraDB Cluster + xtrabackup-v2 SST.
+      # Use absolute paths for the --version probes -- the packer shell
+      # provisioner runs as a non-login shell where /usr/sbin/ is NOT in
+      # PATH by default. `test -x` passes (file exists) but bare `mysqld
+      # --version` fails with `not found` (exit 127).
+      "test -x /usr/sbin/mysqld",
+      "test -x /usr/bin/xtrabackup",
+      "/usr/sbin/mysqld --version",
+      "/usr/bin/xtrabackup --version 2>&1 | head -1",
+      # 0.G.3 -- ProxySQL + keepalived
+      "test -x /usr/bin/proxysql",
+      "test -x /usr/sbin/keepalived",
+      "/usr/bin/proxysql --version 2>&1 | head -1",
+      "/usr/sbin/keepalived --version 2>&1 | head -1",
+      # All nexus-{redis,mongo,percona,proxysql}.service + the bootstrap
+      # variant are INTENTIONALLY DISABLED at template time -- the template
+      # has no per-host identity yet. firstboot writes the identity env file;
+      # Terraform role-overlays render the per-cluster config + enable
+      # exactly one cluster's service per node. `systemctl cat` exits 0 if
+      # the unit file exists in any lookup path regardless of enable-state.
       "systemctl cat nexus-redis.service > /dev/null",
       "systemctl cat nexus-mongo.service > /dev/null",
+      "systemctl cat nexus-percona.service > /dev/null",
+      "systemctl cat nexus-percona-bootstrap.service > /dev/null",
+      "systemctl cat nexus-proxysql.service > /dev/null",
       "systemctl cat oltp-node-firstboot.service > /dev/null",
       "systemctl is-enabled oltp-node-firstboot",
       "systemctl is-enabled ssh",
       "systemctl is-enabled nftables",
       "systemctl is-enabled chrony",
       "systemctl is-enabled prometheus-node-exporter",
-      # Both apt-shipped services MUST be disabled + masked so a cold boot
-      # does not race nexus-{redis,mongo}.service for their listening
-      # ports. is-enabled on a masked unit emits 'masked' to stdout AND
-      # exits non-zero (rc=1), so we grep for 'masked' against the OR'd
-      # combined output.
+      # All apt-shipped services MUST be disabled + masked so a cold boot
+      # does not race nexus-*.service for their listening ports.
+      # is-enabled on a masked unit emits 'masked' to stdout AND exits
+      # non-zero (rc=1), so we grep for 'masked' against the OR'd combined
+      # output.
       "systemctl is-enabled redis-server.service 2>&1 | grep -qE '^(masked|disabled)$' || (echo 'ERROR: redis-server.service is not masked/disabled' && exit 1)",
-      "systemctl is-enabled mongod.service 2>&1 | grep -qE '^(masked|disabled)$' || (echo 'ERROR: mongod.service is not masked/disabled' && exit 1)",
+      "systemctl is-enabled mongod.service        2>&1 | grep -qE '^(masked|disabled)$' || (echo 'ERROR: mongod.service is not masked/disabled' && exit 1)",
+      "systemctl is-enabled mysql.service         2>&1 | grep -qE '^(masked|disabled)$' || (echo 'ERROR: mysql.service is not masked/disabled (Percona apt-shipped; would auto-bootstrap a junk cluster)' && exit 1)",
+      "systemctl is-enabled proxysql.service      2>&1 | grep -qE '^(masked|disabled)$' || (echo 'ERROR: proxysql.service is not masked/disabled (vendor apt-shipped)' && exit 1)",
       "id redis",
       "id mongodb",
+      "id mysql",
+      "id proxysql",
       "echo '--- cleanup ---'",
       "sudo apt-get clean",
       "sudo rm -rf /var/lib/apt/lists/*",
