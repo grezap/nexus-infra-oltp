@@ -52,12 +52,16 @@
     path: "/etc/apt/sources.list.d/percona-pxc-{{ oltp_node_pxc_version | replace('.', '') }}-release.list"
     regexp: '(\s)(trixie|noble|jammy)(\s+main)'
     replace: '\1bookworm\3'
-  register: percona_pin
 
-- name: apt-get update after Percona repo pin
+# Unconditional apt cache refresh after the repo pin -- cheap (~1s) +
+# idempotent. The previous "when: percona_pin.changed" variant trips
+# ansible-lint no-handler (changed-only tasks "should likely be handlers"),
+# but handlers run at end-of-play which is too late: the very next task
+# installs from the pinned repo + needs a fresh cache. Always-running the
+# cache update sidesteps both the lint warning + the handler-timing issue.
+- name: Apt-get update after Percona repo pin
   ansible.builtin.apt:
     update_cache: true
-  when: percona_pin.changed
 
 - name: Install Percona XtraDB Cluster server + client + xtrabackup
   ansible.builtin.apt:

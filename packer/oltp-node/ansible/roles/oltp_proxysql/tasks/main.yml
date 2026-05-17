@@ -52,7 +52,7 @@
     group: root
     mode: '0644'
 
-- name: apt-get update (ProxySQL repo added)
+- name: Apt-get update (ProxySQL repo added)
   ansible.builtin.apt:
     update_cache: true
 
@@ -151,8 +151,14 @@
   failed_when: false   # keepalived --version exits non-zero on some builds
 
 - name: Show installed ProxySQL + keepalived versions
+  vars:
+    proxysql_v: "{{ oltp_proxysql_verify.results[0].stdout_lines[0] | default('(version unavailable)') }}"
+    keepalived_v: >-
+      {{ oltp_proxysql_verify.results[1].stderr_lines[0]
+         | default(oltp_proxysql_verify.results[1].stdout_lines[0])
+         | default('(version unavailable)') }}
   ansible.builtin.debug:
     msg:
-      - "proxysql:   {{ oltp_proxysql_verify.results[0].stdout_lines[0] | default('(version unavailable)') }}"
-      - "keepalived: {{ oltp_proxysql_verify.results[1].stderr_lines[0] | default(oltp_proxysql_verify.results[1].stdout_lines[0]) | default('(version unavailable)') }}"
+      - "proxysql:   {{ proxysql_v }}"
+      - "keepalived: {{ keepalived_v }}"
       - "Vendor major: {{ oltp_node_proxysql_version }} (from repo.proxysql.com/ProxySQL/proxysql-{{ oltp_node_proxysql_version }}.x/debian)"
