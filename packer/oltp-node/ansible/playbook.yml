@@ -25,6 +25,8 @@
     # Pass-through from Packer extra-vars to role-internal names.
     oltp_node_redis_version: "{{ oltp_node_redis_version | default('apt-default') }}"
     oltp_node_mongodb_version: "{{ oltp_node_mongodb_version | default('8.0') }}"
+    oltp_node_pxc_version: "{{ oltp_node_pxc_version | default('8.0') }}"
+    oltp_node_proxysql_version: "{{ oltp_node_proxysql_version | default('2.6') }}"
 
   roles:
     - nexus_identity
@@ -33,3 +35,5 @@
     - nexus_observability
     - oltp_redis
     - oltp_mongo
+    - oltp_pxc
+    - oltp_proxysql

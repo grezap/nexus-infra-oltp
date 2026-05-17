@@ -7,7 +7,7 @@
 # VMnet10 backplane .link MAC-match.
 #
 # KEY DIFFERENCE from kafka-node-firstboot.sh: the IP-to-role map covers
-# ALL 0.G.* clusters (redis / mongo / percona / patroni). In 0.G.1 only
+# ALL 0.G.* clusters (redis / mongo / percona pxc+proxysql / patroni). In 0.G.1 only
 # the redis-1..6 IPs are populated; later sub-phases extend this map as
 # their foundation reservations + Packer role tasks land. A clone landing
 # on an unmapped IP fails fast with a clear error.
@@ -121,7 +121,7 @@ echo "$LOG_PREFIX nic0 (VMnet11) IP: $VMNET11_IP"
 
 # ─── 4. Map IP -> hostname + VMnet10 IP + role + cluster ─────────────────
 # Canon: nexus-platform-plan/docs/infra/vms.yaml (cluster: redis +
-# cluster: mongo so far; percona/patroni extend per sub-phase).
+# cluster: mongo + percona so far; patroni extends per sub-phase).
 # Convention: VMnet10 third octet = 10; fourth octet matches VMnet11.
 HOSTNAME=""; VMNET10_IP=""; ROLE=""; CLUSTER=""
 case "$VMNET11_IP" in
@@ -138,15 +138,19 @@ case "$VMNET11_IP" in
   192.168.70.72) HOSTNAME=mongo-2; VMNET10_IP=192.168.10.72; ROLE=mongo; CLUSTER=mongo ;;
   192.168.70.73) HOSTNAME=mongo-3; VMNET10_IP=192.168.10.73; ROLE=mongo; CLUSTER=mongo ;;
 
-  # ─── 0.G.3 -- Percona XtraDB + ProxySQL (5 nodes) -- TODO ─────────────
-  # 192.168.70.51..55) percona-{1..3}, proxysql-{1,2}
+  # ─── 0.G.3 -- Percona XtraDB Cluster + ProxySQL (5 nodes) ────────────
+  192.168.70.51) HOSTNAME=pxc-node-1; VMNET10_IP=192.168.10.51; ROLE=pxc; CLUSTER=percona ;;
+  192.168.70.52) HOSTNAME=pxc-node-2; VMNET10_IP=192.168.10.52; ROLE=pxc; CLUSTER=percona ;;
+  192.168.70.53) HOSTNAME=pxc-node-3; VMNET10_IP=192.168.10.53; ROLE=pxc; CLUSTER=percona ;;
+  192.168.70.54) HOSTNAME=proxysql-1; VMNET10_IP=192.168.10.54; ROLE=proxysql; CLUSTER=percona ;;
+  192.168.70.55) HOSTNAME=proxysql-2; VMNET10_IP=192.168.10.55; ROLE=proxysql; CLUSTER=percona ;;
 
   # ─── 0.G.4 -- Patroni + etcd + HAProxy (7 nodes) -- TODO ──────────────
   # 192.168.70.61..67) patroni-{1..3}, etcd-{1..3}, haproxy-1
 
   *)
     echo "$LOG_PREFIX ERROR: unknown VMnet11 IP '$VMNET11_IP' -- not a 0.G OLTP tier IP" >&2
-    echo "$LOG_PREFIX recognised IPs: redis-1..6 (.81/.82/.83/.84/.87/.89); mongo-1..3 (.71/.72/.73); other 0.G.* clusters land later sub-phases." >&2
+    echo "$LOG_PREFIX recognised IPs: redis-1..6 (.81/.82/.83/.84/.87/.89); mongo-1..3 (.71/.72/.73); pxc-node-1..3 (.51/.52/.53); proxysql-1..2 (.54/.55); other 0.G.* clusters land later sub-phases." >&2
     exit 1
     ;;
 esac
@@ -156,8 +160,15 @@ echo "$LOG_PREFIX mapped: hostname=$HOSTNAME role=$ROLE cluster=$CLUSTER VMnet10
 # for the cluster owns the dir + the service runs as the cluster-named
 # user; firstboot just writes the env file into the dir).
 case "$CLUSTER" in
-  redis) IDENTITY_DIR=/etc/nexus-redis; IDENTITY_GROUP=redis ;;
-  mongo) IDENTITY_DIR=/etc/nexus-mongo; IDENTITY_GROUP=mongodb ;;
+  redis)   IDENTITY_DIR=/etc/nexus-redis;   IDENTITY_GROUP=redis ;;
+  mongo)   IDENTITY_DIR=/etc/nexus-mongo;   IDENTITY_GROUP=mongodb ;;
+  percona) IDENTITY_DIR=/etc/nexus-percona; IDENTITY_GROUP=mysql ;;
+  # NOTE: percona cluster covers both pxc-node-N and proxysql-N hosts.
+  # PXC nodes own the dir as mysql; ProxySQL nodes only READ from it for
+  # the shared TLS material. Group=mysql is fine for both since the dir
+  # is mode 0750 root:mysql + ProxySQL nodes additionally get
+  # /etc/nexus-percona/proxysql-admin-password (mode 0400 root:proxysql)
+  # rendered separately by chunk 3b TLS overlay.
   *)
     echo "$LOG_PREFIX ERROR: unknown CLUSTER '$CLUSTER' -- no identity dir mapping" >&2
     exit 1

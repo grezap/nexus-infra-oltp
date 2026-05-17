@@ -1,0 +1,37 @@
+[Unit]
+Description=Nexus ProxySQL v2 (MySQL connection pool + Galera-aware LB in front of PXC)
+Documentation=https://proxysql.com/documentation/
+After=network-online.target oltp-node-firstboot.service
+Wants=network-online.target
+Requires=oltp-node-firstboot.service
+# Delivered DISABLED by the oltp_proxysql Packer role. role-overlay-
+# proxysql-config.tf renders /etc/proxysql.cnf + enables + starts this
+# unit per-host on the 2 ProxySQL nodes (chunk 3d).
+ConditionPathExists=/etc/proxysql.cnf
+# StartLimit* in [Unit] per systemd.unit(5) (the 0.G.1 ratification lesson).
+# Generous limits so a slow PXC backend ramp doesn't make systemd give up.
+StartLimitBurst=15
+StartLimitIntervalSec=600
+
+[Service]
+# Type=simple: ProxySQL has no systemd notify integration. The chunk 3d
+# role-overlay-proxysql-config.tf has its own admin :6032 probe for
+# readiness verification.
+Type=simple
+User={{ oltp_node_proxysql_user }}
+Group={{ oltp_node_proxysql_group }}
+ExecStart=/usr/bin/proxysql --foreground --config /etc/proxysql.cnf
+# Graceful SIGTERM: ProxySQL persists runtime to SQLite + drains active
+# connections cleanly.
+KillSignal=SIGTERM
+Restart=on-failure
+RestartSec=5
+RuntimeDirectory=proxysql
+RuntimeDirectoryMode=0755
+LimitNOFILE=102400
+LimitNPROC=8192
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,186 @@
+---
+# oltp_pxc role -- install Percona XtraDB Cluster from the Percona vendor
+# APT repo, xtrabackup-80 for SST, the 2 systemd units (nexus-percona.service
+# + nexus-percona-bootstrap.service, both DISABLED -- the Terraform role-
+# overlays render config + enable + start per-host via the chunk 3c galera-
+# cluster-bootstrap sequence). Runs after oltp_redis + oltp_mongo inside the
+# oltp-node Packer template.
+#
+# Why Percona vendor APT (not Debian apt main): Debian 13 ships MariaDB
+# as the default mysql-server, not Percona's Galera-enabled fork. Percona's
+# vendor APT at repo.percona.com is canonical for PXC; the `percona-release`
+# helper tool enables the right sub-repos (pxc-80 + tools-80 + ps-80).
+#
+# Why we pin to the bookworm codename even on Debian 13 (trixie): same
+# rationale as oltp_mongo -- Percona's APT support matrix as of 0.G.3
+# lists debian/bookworm as the newest supported codename; trixie typically
+# lags. The .deb packages are statically linked against minimal libc; they
+# run fine on trixie. If Percona ships a trixie repo, switch
+# oltp_node_pxc_apt_codename to "trixie" or detect via lsb_release.
+
+# ─── Percona vendor APT repo (via percona-release) ────────────────────────
+- name: Install prerequisites for Percona vendor APT
+  ansible.builtin.apt:
+    name:
+      - apt-transport-https
+      - ca-certificates
+      - curl
+      - gnupg
+      - lsb-release
+    state: present
+    update_cache: false   # oltp_redis already update_cache'd; cached is fine
+
+- name: Download Percona repo .deb (percona-release)
+  ansible.builtin.get_url:
+    url: https://repo.percona.com/apt/percona-release_latest.generic_all.deb
+    dest: /tmp/percona-release.deb
+    mode: '0644'
+
+- name: Install percona-release package
+  ansible.builtin.apt:
+    deb: /tmp/percona-release.deb
+    state: present
+
+- name: Enable Percona pxc-80 repo (sets up apt sources + GPG)
+  ansible.builtin.command: percona-release setup -y pxc-{{ oltp_node_pxc_version | replace('.', '') }}
+  args:
+    creates: "/etc/apt/sources.list.d/percona-pxc-{{ oltp_node_pxc_version | replace('.', '') }}-release.list"
+  changed_when: true
+
+- name: Pin Percona repo to bookworm codename (trixie packages not yet published)
+  ansible.builtin.replace:
+    path: "/etc/apt/sources.list.d/percona-pxc-{{ oltp_node_pxc_version | replace('.', '') }}-release.list"
+    regexp: '(\s)(trixie|noble|jammy)(\s+main)'
+    replace: '\1bookworm\3'
+  register: percona_pin
+
+- name: apt-get update after Percona repo pin
+  ansible.builtin.apt:
+    update_cache: true
+  when: percona_pin.changed
+
+- name: Install Percona XtraDB Cluster server + client + xtrabackup
+  ansible.builtin.apt:
+    name:
+      - percona-xtradb-cluster-server
+      - percona-xtradb-cluster-client
+      - percona-xtrabackup-80
+      - socat       # xtrabackup-v2 SST transport (donor + joiner side)
+      - rsync       # fallback SST method, useful for diagnostics
+      - qpress      # xtrabackup parallel compression (xtrabackup-80 dep)
+    state: present
+    update_cache: false
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+    # PXC apt install refuses to start mysqld if datadir is non-empty; we
+    # haven't touched /var/lib/mysql so this is fine, but defensively set
+    # the env that suppresses the interactive password prompt regardless.
+    PERCONA_TELEMETRY_DISABLE: "1"
+
+# ─── Disable + mask the apt-shipped mysql.service ─────────────────────────
+# Percona's apt install enables mysql.service by default (auto-bootstraps a
+# size-1 cluster on first start, binds 3306). Our canonical units are
+# nexus-percona.service + nexus-percona-bootstrap.service which read
+# /etc/nexus-percona/my.cnf (NOT /etc/mysql/my.cnf). Leaving the apt unit
+# enabled would race ours on cold boot + auto-bootstrap a junk cluster.
+# Mask is stronger than disable.
+- name: Stop mysql.service (apt-installed) if running
+  ansible.builtin.systemd:
+    name: mysql.service
+    state: stopped
+  failed_when: false
+
+- name: Disable + mask mysql.service (apt-installed)
+  ansible.builtin.systemd:
+    name: mysql.service
+    enabled: false
+    masked: true
+
+- name: Stop mysql@.service template if any instance running
+  ansible.builtin.systemd:
+    name: mysql@bootstrap.service
+    state: stopped
+  failed_when: false
+
+- name: Disable + mask mysql@bootstrap.service template (apt-installed)
+  ansible.builtin.systemd:
+    name: mysql@bootstrap.service
+    enabled: false
+    masked: true
+
+# ─── mysql system account (apt creates it; verify only) ──────────────────
+- name: Verify mysql group exists (apt-created)
+  ansible.builtin.getent:
+    database: group
+    key: "{{ oltp_node_pxc_group }}"
+
+- name: Verify mysql user exists (apt-created)
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ oltp_node_pxc_user }}"
+
+# ─── Per-node config + tls + data + log dirs ──────────────────────────────
+# config dir is root:mysql 0750 -- Terraform overlays write here as root,
+# nexus-percona.service reads as mysql. Same pattern as /etc/nexus-redis,
+# /etc/nexus-mongo, /etc/nexus-kafka.
+- name: Create nexus-percona directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "{{ oltp_node_pxc_config_dir }}", owner: root, group: "{{ oltp_node_pxc_group }}", mode: '0750' }
+    - { path: "{{ oltp_node_pxc_config_dir }}/tls", owner: root, group: "{{ oltp_node_pxc_group }}", mode: '0750' }
+    - { path: "{{ oltp_node_pxc_data_dir }}", owner: "{{ oltp_node_pxc_user }}", group: "{{ oltp_node_pxc_group }}", mode: '0750' }
+    - { path: "{{ oltp_node_pxc_log_dir }}", owner: "{{ oltp_node_pxc_user }}", group: "{{ oltp_node_pxc_group }}", mode: '0750' }
+
+# ─── nexus-percona.service + nexus-percona-bootstrap.service (DISABLED) ──
+- name: Install nexus-percona.service systemd unit
+  ansible.builtin.template:
+    src: nexus-percona.service.j2
+    dest: /etc/systemd/system/nexus-percona.service
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Reload systemd
+
+- name: Install nexus-percona-bootstrap.service systemd unit
+  ansible.builtin.template:
+    src: nexus-percona-bootstrap.service.j2
+    dest: /etc/systemd/system/nexus-percona-bootstrap.service
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Reload systemd
+
+- name: Ensure nexus-percona.service + nexus-percona-bootstrap.service are disabled at bake
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    enabled: false
+    daemon_reload: true
+  loop:
+    - nexus-percona.service
+    - nexus-percona-bootstrap.service
+
+# Firstboot is owned by the oltp_redis role (the firstboot script + systemd
+# unit are shared across all oltp_<engine> roles -- only the IP-to-role map
+# inside the script varies per sub-phase). This role does NOT touch
+# /usr/local/sbin/oltp-node-firstboot.sh or its service.
+
+# ─── Verify ──────────────────────────────────────────────────────────────
+- name: Verify Percona tooling
+  ansible.builtin.command: "{{ item }}"
+  changed_when: false
+  loop:
+    - mysqld --version
+    - xtrabackup --version
+  register: oltp_pxc_verify
+
+- name: Show installed Percona version
+  ansible.builtin.debug:
+    msg:
+      - "mysqld:     {{ oltp_pxc_verify.results[0].stdout_lines[0] }}"
+      - "xtrabackup: {{ oltp_pxc_verify.results[1].stderr_lines[0] | default(oltp_pxc_verify.results[1].stdout_lines[0]) }}"
+      - "Vendor major: {{ oltp_node_pxc_version }} (from repo.percona.com/apt pxc-{{ oltp_node_pxc_version | replace('.', '') }})"

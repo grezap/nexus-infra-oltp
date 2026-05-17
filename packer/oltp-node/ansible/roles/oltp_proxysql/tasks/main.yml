@@ -1,0 +1,158 @@
+---
+# oltp_proxysql role -- install ProxySQL v2 from the vendor APT repo +
+# keepalived from Debian apt main, the systemd unit (DISABLED -- the
+# Terraform role-overlay-proxysql-config.tf renders /etc/proxysql.cnf +
+# enables nexus-proxysql.service per-host, role-overlay-proxysql-
+# keepalived.tf renders /etc/keepalived/keepalived.conf + check script +
+# starts keepalived.service per-host). Runs after oltp_pxc inside the
+# oltp-node Packer template.
+#
+# Why ProxySQL vendor APT (not Debian apt main): Debian 13 ships an
+# older ProxySQL v1.x or doesn't ship it at all. The vendor APT at
+# repo.proxysql.com is canonical for v2.x. Galera-aware features
+# (mysql_galera_hostgroups) are v2-only.
+
+# ─── ProxySQL vendor APT repo ────────────────────────────────────────────
+- name: Install prerequisites for ProxySQL vendor APT
+  ansible.builtin.apt:
+    name:
+      - apt-transport-https
+      - ca-certificates
+      - curl
+      - gnupg
+      - lsb-release
+    state: present
+    update_cache: false
+
+- name: Ensure /etc/apt/keyrings exists
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Download ProxySQL GPG key
+  ansible.builtin.shell: |
+    set -euo pipefail
+    curl -fsSL "https://repo.proxysql.com/ProxySQL/repo_pub_key" \
+      | gpg --dearmor -o /etc/apt/keyrings/proxysql.gpg
+    chmod 644 /etc/apt/keyrings/proxysql.gpg
+  args:
+    creates: /etc/apt/keyrings/proxysql.gpg
+
+- name: Add ProxySQL vendor APT repository
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/proxysql.list
+    content: >
+      deb [arch=amd64 signed-by=/etc/apt/keyrings/proxysql.gpg]
+      https://repo.proxysql.com/ProxySQL/proxysql-{{ oltp_node_proxysql_version }}.x/debian/
+      bookworm main
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: apt-get update (ProxySQL repo added)
+  ansible.builtin.apt:
+    update_cache: true
+
+- name: Install proxysql2 + keepalived (VRRP VIP failover)
+  ansible.builtin.apt:
+    name:
+      - proxysql2
+      - keepalived
+    state: present
+    update_cache: false
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+
+# ─── Disable + mask the apt-shipped proxysql.service ─────────────────────
+# Vendor apt enables proxysql.service by default (binds :6032 + :6033 +
+# auto-loads /etc/proxysql.cnf with stock defaults). Our canonical unit is
+# nexus-proxysql.service which the chunk 3d Terraform overlay enables per-
+# host after rendering the right /etc/proxysql.cnf. Leaving the apt unit
+# enabled would race ours on cold boot.
+- name: Stop proxysql.service (apt-installed) if running
+  ansible.builtin.systemd:
+    name: proxysql.service
+    state: stopped
+  failed_when: false
+
+- name: Disable + mask proxysql.service (apt-installed)
+  ansible.builtin.systemd:
+    name: proxysql.service
+    enabled: false
+    masked: true
+
+# ─── Disable keepalived.service at bake (TF overlay enables per-host) ────
+# keepalived is harmless without /etc/keepalived/keepalived.conf (refuses
+# to start), so we just ensure it's not auto-enabled. The chunk 3d
+# role-overlay-proxysql-keepalived.tf does the per-host enable on the 2
+# ProxySQL nodes only (PXC nodes don't need keepalived at all).
+- name: Disable keepalived.service at bake (TF overlay enables per-host)
+  ansible.builtin.systemd:
+    name: keepalived.service
+    enabled: false
+  failed_when: false
+
+# ─── proxysql + keepalived system accounts (apt creates them; verify) ────
+- name: Verify proxysql group exists (apt-created)
+  ansible.builtin.getent:
+    database: group
+    key: "{{ oltp_node_proxysql_group }}"
+
+- name: Verify proxysql user exists (apt-created)
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ oltp_node_proxysql_user }}"
+
+# ─── Per-node dirs ───────────────────────────────────────────────────────
+# /etc/nexus-percona is created by oltp_pxc role (PXC nodes hit it first
+# in the playbook); on ProxySQL nodes (which don't run oltp_pxc tasks at
+# firstboot anyway but DO have it baked in the template), it's already
+# created. We additionally create /var/lib/proxysql and /var/log/proxysql
+# for the runtime SQLite + logs.
+- name: Create proxysql runtime + log dirs
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "{{ oltp_node_proxysql_runtime_dir }}", owner: "{{ oltp_node_proxysql_user }}", group: "{{ oltp_node_proxysql_group }}", mode: '0755' }
+    - { path: "{{ oltp_node_proxysql_log_dir }}", owner: "{{ oltp_node_proxysql_user }}", group: "{{ oltp_node_proxysql_group }}", mode: '0755' }
+    - { path: /etc/keepalived, owner: root, group: root, mode: '0755' }
+
+# ─── nexus-proxysql.service (DISABLED at bake) ───────────────────────────
+- name: Install nexus-proxysql.service systemd unit
+  ansible.builtin.template:
+    src: nexus-proxysql.service.j2
+    dest: /etc/systemd/system/nexus-proxysql.service
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Reload systemd
+
+- name: Ensure nexus-proxysql.service is disabled at bake
+  ansible.builtin.systemd:
+    name: nexus-proxysql.service
+    enabled: false
+    daemon_reload: true
+
+# ─── Verify ──────────────────────────────────────────────────────────────
+- name: Verify proxysql + keepalived tooling
+  ansible.builtin.command: "{{ item }}"
+  changed_when: false
+  loop:
+    - proxysql --version
+    - keepalived --version
+  register: oltp_proxysql_verify
+  failed_when: false   # keepalived --version exits non-zero on some builds
+
+- name: Show installed ProxySQL + keepalived versions
+  ansible.builtin.debug:
+    msg:
+      - "proxysql:   {{ oltp_proxysql_verify.results[0].stdout_lines[0] | default('(version unavailable)') }}"
+      - "keepalived: {{ oltp_proxysql_verify.results[1].stderr_lines[0] | default(oltp_proxysql_verify.results[1].stdout_lines[0]) | default('(version unavailable)') }}"
+      - "Vendor major: {{ oltp_node_proxysql_version }} (from repo.proxysql.com/ProxySQL/proxysql-{{ oltp_node_proxysql_version }}.x/debian)"
