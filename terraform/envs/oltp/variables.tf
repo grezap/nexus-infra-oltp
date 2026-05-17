@@ -368,3 +368,151 @@ variable "vault_pki_mongo_role_name" {
   default     = "mongo-server"
   description = "Name of the Vault PKI role under pki_int/ that issues leaf certs for the 3-node MongoDB Replica Set. Must match var.vault_pki_mongo_role_name in nexus-infra-vmware's security env."
 }
+
+# ─── Phase 0.G.3 — Percona XtraDB Cluster + ProxySQL ──────────────────────
+# Per-VM toggles + MACs + overlay toggles. Primary MACs MUST match
+# nexus-infra-vmware foundation env's mac_oltp_{pxc_N,proxysql_N}_primary
+# defaults (the dhcp-host reservations pin those MACs to .51-.55 on VMnet11).
+
+variable "enable_pxc_node_1" {
+  type    = bool
+  default = true
+}
+variable "enable_pxc_node_2" {
+  type    = bool
+  default = true
+}
+variable "enable_pxc_node_3" {
+  type    = bool
+  default = true
+}
+variable "enable_proxysql_1" {
+  type    = bool
+  default = true
+}
+variable "enable_proxysql_2" {
+  type    = bool
+  default = true
+}
+
+variable "mac_pxc_node_1_primary" {
+  type        = string
+  default     = "00:50:56:3F:00:79"
+  description = "pxc-node-1 primary NIC MAC (VMnet11). dnsmasq dhcp-host pins this to 192.168.70.51. The Galera bootstrap node (`wsrep_cluster_address=gcomm://` flips here on first apply, then back to the full peer list on subsequent applies)."
+}
+variable "mac_pxc_node_1_secondary" {
+  type        = string
+  default     = "00:50:56:3F:01:79"
+  description = "pxc-node-1 secondary NIC MAC (VMnet10). oltp-node-firstboot.sh assigns 192.168.10.51 statically -- Galera SST/IST replication runs on the backplane to keep multi-GB transfers off the service NIC."
+}
+variable "mac_pxc_node_2_primary" {
+  type    = string
+  default = "00:50:56:3F:00:7A"
+}
+variable "mac_pxc_node_2_secondary" {
+  type    = string
+  default = "00:50:56:3F:01:7A"
+}
+variable "mac_pxc_node_3_primary" {
+  type    = string
+  default = "00:50:56:3F:00:7B"
+}
+variable "mac_pxc_node_3_secondary" {
+  type    = string
+  default = "00:50:56:3F:01:7B"
+}
+variable "mac_proxysql_1_primary" {
+  type    = string
+  default = "00:50:56:3F:00:7C"
+}
+variable "mac_proxysql_1_secondary" {
+  type    = string
+  default = "00:50:56:3F:01:7C"
+}
+variable "mac_proxysql_2_primary" {
+  type    = string
+  default = "00:50:56:3F:00:7D"
+}
+variable "mac_proxysql_2_secondary" {
+  type    = string
+  default = "00:50:56:3F:01:7D"
+}
+
+# ─── Per-overlay toggles for the Percona cluster (chunks 3b/3c/3d) ───────
+
+variable "enable_percona_vault_agents" {
+  type        = bool
+  default     = true
+  description = "Master gate for role-overlay-percona-vault-agents.tf -- install nexus-vault-agent.service on all 5 nodes (3 PXC + 2 ProxySQL). Reads the per-host AppRole sidecars written by nexus-infra-vmware's security env (vault-agent-oltp-percona-<host>.json)."
+}
+
+variable "enable_pxc_node_1_vault_agent" {
+  type    = bool
+  default = true
+}
+variable "enable_pxc_node_2_vault_agent" {
+  type    = bool
+  default = true
+}
+variable "enable_pxc_node_3_vault_agent" {
+  type    = bool
+  default = true
+}
+variable "enable_proxysql_1_vault_agent" {
+  type    = bool
+  default = true
+}
+variable "enable_proxysql_2_vault_agent" {
+  type    = bool
+  default = true
+}
+
+variable "enable_percona_tls" {
+  type        = bool
+  default     = true
+  description = "role-overlay-percona-tls.tf (chunk 3b) -- drop the Vault Agent PKI template that renders /etc/nexus-percona/{server.pem,client.pem,ca.crt} + KV templates that render the 4 cluster creds (cluster-password, monitor-password, root-password, proxysql-admin-password) from Vault KV (nexus/oltp/percona/* sticky-seeds). Default true."
+}
+
+variable "enable_percona_config" {
+  type        = bool
+  default     = true
+  description = "role-overlay-percona-config.tf (chunk 3b) -- render /etc/nexus-percona/my.cnf + /etc/nexus-percona/wsrep.cnf per PXC node (wsrep_provider, wsrep_cluster_address full peer list on VMnet10 backplane, wsrep_node_name, wsrep_sst_method=xtrabackup-v2, MySQL TLS on 3306, performance_schema tuning for 8 GB RAM). Default true."
+}
+
+variable "enable_galera_cluster_bootstrap" {
+  type        = bool
+  default     = true
+  description = "role-overlay-percona-galera-bootstrap.tf (chunk 3c) -- one-shot probe-then-bootstrap: detect via `mysql -e \"SHOW STATUS LIKE 'wsrep_cluster_size'\"` whether the cluster is already formed; if not, run `galera_new_cluster` on pxc-node-1 + create wsrep_sst/clustercheck/root users + start mysql.service on pxc-node-2 + pxc-node-3 to join via SST. Assert wsrep_cluster_size=3 + wsrep_local_state_comment=Synced on all 3. Default true."
+}
+
+variable "enable_proxysql_config" {
+  type        = bool
+  default     = true
+  description = "role-overlay-proxysql-config.tf (chunk 3d) -- render /etc/proxysql.cnf per ProxySQL node (mysql_servers pointing at all 3 PXC nodes, mysql_galera_hostgroups with writer/reader/backup-writer/offline-soft splits, mysql_users for app + monitor, admin-admin_credentials from KV nexus/oltp/percona/proxysql-admin-password). Default true."
+}
+
+variable "enable_keepalived_vip" {
+  type        = bool
+  default     = true
+  description = "role-overlay-proxysql-keepalived.tf (chunk 3d) -- install + configure keepalived on both ProxySQL nodes with VRRP between them (instance id 51, virtual_ipaddress 192.168.70.50/24, advert_int 1, priority 110 on proxysql-1 / 100 on proxysql-2, authentication via cluster-password KV). Health script checks ProxySQL is serving on :6033 before claiming MASTER. Default true."
+}
+
+# ─── Phase 0.G.3 — Percona Vault Agent + PKI cross-env coupling ──────────
+
+variable "vault_agent_percona_creds_dir" {
+  type        = string
+  default     = "$HOME/.nexus"
+  description = "Directory on the build host holding the 5 vault-agent-oltp-percona-<host>.json AppRole sidecars (3 PXC + 2 ProxySQL), written by nexus-infra-vmware security env's role-overlay-vault-agent-percona-approles.tf."
+}
+
+variable "vault_pki_percona_role_name" {
+  type        = string
+  default     = "percona-server"
+  description = "Name of the Vault PKI role under pki_int/ that issues leaf certs for the 3 PXC + 2 ProxySQL nodes. Must match var.vault_pki_percona_role_name in nexus-infra-vmware's security env."
+}
+
+variable "proxysql_vip" {
+  type        = string
+  default     = "192.168.70.50"
+  description = "VRRP-floated virtual IP that lands on whichever ProxySQL node is currently keepalived MASTER. Apps connect to this VIP on :6033 (ProxySQL's MySQL frontend). Per nexus-platform-plan/docs/infra/vms.yaml percona.virtual_ips.proxysql_vip."
+}

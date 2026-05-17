@@ -186,3 +186,93 @@ module "mongo_3" {
   vnet_secondary = var.vnet_secondary
   mac_secondary  = var.mac_mongo_3_secondary
 }
+
+# ─── Phase 0.G.3 — Percona XtraDB Cluster + ProxySQL (5 nodes) ───────────
+# 3 PXC (Galera-replicated MySQL data plane) + 2 ProxySQL (connection pool
+# + LB with VRRP-floated VIP 192.168.70.50). Per nexus-platform-plan/docs/
+# infra/vms.yaml (cluster: percona, phase: 0.G).
+# Dual-NIC: VMnet11 service (DHCP via nexus-gateway dnsmasq dhcp-host
+# reservations → .51-.55 owned by nexus-infra-vmware foundation env v3
+# marker) + VMnet10 cluster backplane (static per-hostname IP set by
+# oltp-node-firstboot.sh; Galera SST/IST replication runs on the
+# backplane to keep multi-GB SST traffic off the service NIC).
+
+module "pxc_node_1" {
+  source = "../../modules/vm"
+  count  = var.enable_percona && var.enable_pxc_node_1 ? 1 : 0
+
+  vm_name           = "pxc-node-1"
+  template_vmx_path = "${var.template_root}/oltp-node/oltp-node.vmx"
+  vm_output_dir     = "${var.vm_output_dir_root}/05-oltp/pxc-node-1"
+  vmrun_path        = var.vmrun_path
+
+  vnet        = var.vnet_primary
+  mac_address = var.mac_pxc_node_1_primary
+
+  vnet_secondary = var.vnet_secondary
+  mac_secondary  = var.mac_pxc_node_1_secondary
+}
+
+module "pxc_node_2" {
+  source = "../../modules/vm"
+  count  = var.enable_percona && var.enable_pxc_node_2 ? 1 : 0
+
+  vm_name           = "pxc-node-2"
+  template_vmx_path = "${var.template_root}/oltp-node/oltp-node.vmx"
+  vm_output_dir     = "${var.vm_output_dir_root}/05-oltp/pxc-node-2"
+  vmrun_path        = var.vmrun_path
+
+  vnet        = var.vnet_primary
+  mac_address = var.mac_pxc_node_2_primary
+
+  vnet_secondary = var.vnet_secondary
+  mac_secondary  = var.mac_pxc_node_2_secondary
+}
+
+module "pxc_node_3" {
+  source = "../../modules/vm"
+  count  = var.enable_percona && var.enable_pxc_node_3 ? 1 : 0
+
+  vm_name           = "pxc-node-3"
+  template_vmx_path = "${var.template_root}/oltp-node/oltp-node.vmx"
+  vm_output_dir     = "${var.vm_output_dir_root}/05-oltp/pxc-node-3"
+  vmrun_path        = var.vmrun_path
+
+  vnet        = var.vnet_primary
+  mac_address = var.mac_pxc_node_3_primary
+
+  vnet_secondary = var.vnet_secondary
+  mac_secondary  = var.mac_pxc_node_3_secondary
+}
+
+module "proxysql_1" {
+  source = "../../modules/vm"
+  count  = var.enable_percona && var.enable_proxysql_1 ? 1 : 0
+
+  vm_name           = "proxysql-1"
+  template_vmx_path = "${var.template_root}/oltp-node/oltp-node.vmx"
+  vm_output_dir     = "${var.vm_output_dir_root}/05-oltp/proxysql-1"
+  vmrun_path        = var.vmrun_path
+
+  vnet        = var.vnet_primary
+  mac_address = var.mac_proxysql_1_primary
+
+  vnet_secondary = var.vnet_secondary
+  mac_secondary  = var.mac_proxysql_1_secondary
+}
+
+module "proxysql_2" {
+  source = "../../modules/vm"
+  count  = var.enable_percona && var.enable_proxysql_2 ? 1 : 0
+
+  vm_name           = "proxysql-2"
+  template_vmx_path = "${var.template_root}/oltp-node/oltp-node.vmx"
+  vm_output_dir     = "${var.vm_output_dir_root}/05-oltp/proxysql-2"
+  vmrun_path        = var.vmrun_path
+
+  vnet        = var.vnet_primary
+  mac_address = var.mac_proxysql_2_primary
+
+  vnet_secondary = var.vnet_secondary
+  mac_secondary  = var.mac_proxysql_2_secondary
+}

@@ -21,8 +21,17 @@
  *   - 6379     (Redis TLS data port)
  *   - 16379    (Redis Cluster bus -- gossip + failover voting; full mesh
  *               between all 6 nodes)
+ *   - 27017    (MongoDB TLS data port -- also serves RS heartbeat /
+ *               replication / election traffic between members)
+ *   - 3306     (Percona MySQL data port -- PXC accepts direct connections;
+ *               apps typically come in via ProxySQL on 6033 instead)
+ *   - 6032     (ProxySQL admin interface on the 2 ProxySQL nodes)
+ *   - 6033     (ProxySQL frontend MySQL port -- apps connect here, ProxySQL
+ *               routes to PXC backends with Galera-aware hostgroup splits)
+ *   - proto 112 + 224.0.0.18 (VRRP -- keepalived between the 2 ProxySQL
+ *               nodes for the VIP 192.168.70.50 failover)
  *   - VMnet10  (whole-segment trust -- mirrors kafka's nic1 trust pattern;
- *               cluster bus + replication run here)
+ *               cluster bus + replication + Galera SST/IST run here)
  *
  * Ruleset is inlined here as a local (NOT read from a Packer-baked file like
  * kafka does) -- the 3d oltp-node Packer template bakes a baseline copy at
@@ -53,9 +62,17 @@ locals {
     var.enable_mongo_2 ? "192.168.70.72" : "",
     var.enable_mongo_3 ? "192.168.70.73" : "",
   ])
+  percona_node_ips = compact([
+    var.enable_pxc_node_1 ? "192.168.70.51" : "",
+    var.enable_pxc_node_2 ? "192.168.70.52" : "",
+    var.enable_pxc_node_3 ? "192.168.70.53" : "",
+    var.enable_proxysql_1 ? "192.168.70.54" : "",
+    var.enable_proxysql_2 ? "192.168.70.55" : "",
+  ])
   oltp_node_ips = concat(
     var.enable_redis ? local.redis_node_ips : [],
     var.enable_mongo ? local.mongo_node_ips : [],
+    var.enable_percona ? local.percona_node_ips : [],
   )
 
   # Inlined oltp-node nftables ruleset. Whole-segment VMnet10 trust + the
@@ -64,7 +81,7 @@ locals {
     #!/usr/sbin/nft -f
     # Managed by nexus-infra-oltp/terraform/envs/oltp/role-overlay-oltp-nftables-backplane.tf
     # DO NOT EDIT BY HAND -- terraform overlay re-applies on every apply.
-    # ruleset_v=2
+    # ruleset_v=3
 
     flush ruleset
 
@@ -84,13 +101,25 @@ locals {
         iifname "nic0" tcp dport 6379 accept  # Redis TLS data port (0.G.1)
         iifname "nic0" tcp dport 16379 accept # Redis Cluster bus (0.G.1)
         iifname "nic0" tcp dport 27017 accept # MongoDB TLS data port (0.G.2 -- also serves RS heartbeat / replication / election traffic between members on the same port)
+        iifname "nic0" tcp dport 3306 accept  # Percona MySQL data port (0.G.3 -- PXC accepts direct connections; apps typically come in via ProxySQL on 6033)
+        iifname "nic0" tcp dport 6032 accept  # ProxySQL admin interface (0.G.3 -- only the 2 ProxySQL nodes listen here; harmless on PXC + redis + mongo nodes)
+        iifname "nic0" tcp dport 6033 accept  # ProxySQL frontend MySQL port (0.G.3 -- apps connect here; ProxySQL routes to PXC backends)
+
+        # VRRP for keepalived between the 2 ProxySQL nodes (VIP 192.168.70.50
+        # failover). Protocol 112 = VRRP; advertisements are sent to multicast
+        # 224.0.0.18. Accepting from the VMnet11 segment is narrow enough --
+        # only the 2 ProxySQL nodes participate, the rest just ignore the
+        # multicast frames.
+        iifname "nic0" ip protocol 112 accept                          # VRRP unicast (some configs)
+        iifname "nic0" ip daddr 224.0.0.18 ip protocol 112 accept      # VRRP multicast advertisements
 
         # ─── VMnet10 cluster backplane (whole-segment trust) ────────────────
         # Mirrors nexus-infra-swarm-nomad's swarm-node + nexus-infra-kafka's
         # kafka-node "whole-segment accept" pattern. Cluster bus + replication
-        # flow over the backplane when configured (0.G.1 redis cluster bus
-        # still runs on VMnet11 for simplicity; backplane trust is preserved
-        # for future scale-out flexibility).
+        # flow over the backplane when configured. 0.G.3 Galera SST/IST
+        # (ports 4444/4567/4568) run here -- multi-GB SST transfers stay off
+        # the service NIC. 0.G.1 redis cluster bus still uses VMnet11; the
+        # backplane trust is forward-compat.
         iifname "nic1" ip saddr 192.168.10.0/24 accept
 
         counter drop
@@ -108,7 +137,7 @@ locals {
 }
 
 resource "null_resource" "oltp_nftables_backplane" {
-  count = (var.enable_redis || var.enable_mongo) && var.enable_nftables_backplane ? 1 : 0
+  count = (var.enable_redis || var.enable_mongo || var.enable_percona) && var.enable_nftables_backplane ? 1 : 0
 
   triggers = {
     redis_1     = length(module.redis_1) > 0 ? module.redis_1[0].vm_name : "absent"
@@ -120,14 +149,21 @@ resource "null_resource" "oltp_nftables_backplane" {
     mongo_1     = length(module.mongo_1) > 0 ? module.mongo_1[0].vm_name : "absent"
     mongo_2     = length(module.mongo_2) > 0 ? module.mongo_2[0].vm_name : "absent"
     mongo_3     = length(module.mongo_3) > 0 ? module.mongo_3[0].vm_name : "absent"
+    pxc_node_1  = length(module.pxc_node_1) > 0 ? module.pxc_node_1[0].vm_name : "absent"
+    pxc_node_2  = length(module.pxc_node_2) > 0 ? module.pxc_node_2[0].vm_name : "absent"
+    pxc_node_3  = length(module.pxc_node_3) > 0 ? module.pxc_node_3[0].vm_name : "absent"
+    proxysql_1  = length(module.proxysql_1) > 0 ? module.proxysql_1[0].vm_name : "absent"
+    proxysql_2  = length(module.proxysql_2) > 0 ? module.proxysql_2[0].vm_name : "absent"
     ruleset_sha = sha256(local.oltp_nftables_ruleset)
-    overlay_v   = "2" # v2 (0.G.2) = added port 27017 + mongo node IPs to the push set. v1 = 6-node Redis Cluster only.
+    overlay_v   = "3" # v3 (0.G.3) = added ports 3306/6032/6033 + VRRP proto 112 + 5 percona/proxysql node IPs to the push set. v2 (0.G.2) added port 27017 + mongo nodes. v1 was 6-node Redis Cluster only.
   }
 
   depends_on = [
     module.redis_1, module.redis_2, module.redis_3,
     module.redis_4, module.redis_5, module.redis_6,
     module.mongo_1, module.mongo_2, module.mongo_3,
+    module.pxc_node_1, module.pxc_node_2, module.pxc_node_3,
+    module.proxysql_1, module.proxysql_2,
   ]
 
   provisioner "local-exec" {
