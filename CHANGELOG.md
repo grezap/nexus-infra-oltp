@@ -6,6 +6,31 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Removed — Phase 0.G.3.5c chunk 2 — legacy monolithic paths deleted; per-cluster is canonical (2026-05-18)
+
+Closes the 0.G.3.5 refactor. With the per-cluster envs + per-engine templates LIVE-PROVEN (chunk 1, commit `d076abd`, CI green), the legacy monolithic paths are now dead code. Deleted in this commit:
+
+- `packer/oltp-node/` (entire dir, 46 files): monolithic Packer template bundling redis + mongo + pxc + proxysql in a single `oltp-node.vmx` (~6 GB). Replaced by 4 per-engine templates already proven in chunk 1.
+- `terraform/envs/oltp/` (entire dir, 20 .tf files + .terraform.lock.hcl): monolithic Terraform state managing all 14 OLTP VMs. Replaced by 3 per-cluster states (`envs/oltp-{redis,mongo,percona}/`).
+- `scripts/oltp.ps1`: monolithic operator wrapper. No replacement needed — the 3 per-cluster scripts (`oltp-{redis,mongo,percona}.ps1`) are now the canonical interface; "apply ALL 14 VMs in one shot" semantics deliberately don't have a wrapper.
+
+CI matrix scoped down (`.github/workflows/packer-validate.yml`): 4 per-engine packer templates + 3 per-cluster terraform envs (was 5 packer × 4 terraform incl. legacy entries through chunk 1's `d076abd`). ansible-lint scoped to `packer/oltp-{redis,mongo,pxc,proxysql}-node/ansible/` + `packer/_shared/ansible/`.
+
+Handbook canonicalized:
+
+- §1.1 build the Packer templates (4 per-engine, with shared `PACKER_CACHE_DIR` for ISO reuse + per-template bake-time + footprint table).
+- §1.2 cross-env order: removed the "legacy DEPRECATED" block; per-cluster paths 3a/3b/3c are now canonical.
+- §1.3 / §1.5 / §1.6 consolidated as redirects to §1.7 (the canonical per-cluster walkthrough already had full coverage).
+- §1.4 verify: per-cluster smoke invocations (`oltp-<cluster>.ps1 smoke`).
+- §1.7 renamed "Phase 0.G.3.5b" → "canonical interface".
+- §2 phase status: 0.G.1/0.G.2/0.G.3 + 0.G.3.5a/b/c chunk 1/c chunk 2 all marked ✅ PROVEN cold-rebuildable from per-cluster envs.
+- §3.1 cold-rebuild canon: per-cluster cycle with per-cluster timing table (~5-10 min per cluster vs ~30 min monolithic).
+- §3.x recovery rows updated where the original recommended `oltp.ps1 apply`; now points at per-cluster equivalents. Historical 0.G.3 monolithic-ratification transient rows kept as-is (correct historical record).
+
+README badge bumped to **`0.G.3.5c CLOSED`** (entire 0.G.3.5 refactor done). Status table flipped all 0.G.3.5 chunks to ✅.
+
+**Cross-tier sweep (separate commits to other repos):** `nexus-platform-plan/MASTER-PLAN.md` row for 0.G.3 closure + per-cluster refactor + `docs/infra/vms.yaml` if any spec changed; `nexus-platform-plan/docs/glossary.md` if new tools surfaced; `portfolio-index/README.md` + `grezap/grezap` profile (public-face per `feedback_public_face_must_stay_current.md`).
+
 ### Verified — Phase 0.G.3.5c chunk 1 — LIVE COLD-REBUILD via per-cluster envs ALL GREEN (2026-05-18)
 
 **All 3 OLTP clusters PROVEN cold-rebuildable from per-engine Packer templates + per-cluster Terraform states.** 14 VMs (6 redis + 3 mongo + 3 PXC + 2 ProxySQL) destroyed + cleanly re-cloned from `oltp-{redis,mongo,pxc,proxysql}-node.vmx` artifacts; per-cluster overlays applied; smoke gates green:

@@ -1,9 +1,10 @@
 name: packer-validate
 
-# Mirrors nexus-infra-vmware/.github/workflows/packer-validate.yml shape,
-# scoped to nexus-infra-oltp's single packer template (oltp-node) + single
-# terraform env (envs/oltp). Same five-job structure: packer (matrix) +
-# terraform (matrix) + ansible-lint + shell-lint + gitleaks.
+# Mirrors nexus-infra-vmware/.github/workflows/packer-validate.yml shape.
+# Per the 0.G.3.5c chunk 2 close-out: 4 per-engine packer templates
+# (oltp-{redis,mongo,pxc,proxysql}-node) + 3 per-cluster terraform envs
+# (envs/oltp-{redis,mongo,percona}). Same five-job structure: packer
+# (matrix) + terraform (matrix) + ansible-lint + shell-lint + gitleaks.
 #
 # Added at 0.G.2 close-out 2026-05-17 -- the repo had been receiving pushes
 # since the 0.G.1 scaffold without any automated validation. Per
@@ -38,7 +39,6 @@ jobs:
       max-parallel: 1
       matrix:
         template:
-          - oltp-node            # LEGACY (monolithic; being removed in 0.G.3.5c chunk 2)
           - oltp-redis-node      # Phase 0.G.3.5a per-engine (Redis Cluster)
           - oltp-mongo-node      # Phase 0.G.3.5a per-engine (MongoDB Replica Set)
           - oltp-pxc-node        # Phase 0.G.3.5a per-engine (Percona XtraDB Cluster server)
@@ -79,7 +79,6 @@ jobs:
       fail-fast: false
       matrix:
         env:
-          - envs/oltp          # LEGACY (monolithic; being removed in 0.G.3.5c chunk 2)
           - envs/oltp-redis    # Phase 0.G.3.5b per-cluster (6 redis VMs)
           - envs/oltp-mongo    # Phase 0.G.3.5b per-cluster (3 mongo VMs)
           - envs/oltp-percona  # Phase 0.G.3.5b per-cluster (5 percona VMs)
@@ -104,7 +103,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install ansible-lint ansible
-      - run: ansible-lint packer/oltp-node/ansible/ packer/oltp-redis-node/ansible/ packer/oltp-mongo-node/ansible/ packer/oltp-pxc-node/ansible/ packer/oltp-proxysql-node/ansible/ packer/_shared/ansible/
+      - run: ansible-lint packer/oltp-redis-node/ansible/ packer/oltp-mongo-node/ansible/ packer/oltp-pxc-node/ansible/ packer/oltp-proxysql-node/ansible/ packer/_shared/ansible/
 
   shell-lint:
     name: ShellCheck + PSScriptAnalyzer

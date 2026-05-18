@@ -53,42 +53,45 @@ Cross-tier dependencies (in hard-ordering for cold-rebuild):
 
 ## §1 Phase walkthrough
 
-### §1.1 Build the Packer template
+### §1.1 Build the Packer templates (4 per-engine)
+
+Each OLTP engine gets its own per-engine template per `memory/feedback_per_cluster_state_per_engine_template.md`. Build each in turn (or parallel terminals if your build host has the headroom — shared `PACKER_CACHE_DIR` reuses the Debian 13 ISO across all 4):
 
 ```pwsh
-cd packer\oltp-node
-packer init .
-packer build .
+$env:PACKER_CACHE_DIR = 'H:\VMS\packer_cache'   # shares the Debian ISO download
+foreach ($t in 'oltp-redis-node','oltp-mongo-node','oltp-pxc-node','oltp-proxysql-node') {
+  Push-Location "packer\$t"
+  packer init .
+  packer build -force .
+  Pop-Location
+}
 ```
 
-Bake time est. **~40-55 min wall-clock** on a typical lab host (Debian 13 base install + apt update + Redis 7.x + MongoDB 8.0 + **Percona 8.0 + ProxySQL 2.6 + keepalived** + Ansible roles + post-install cleanup -- 0.G.3 added Percona apt repo via `percona-release` + ProxySQL vendor repo + keepalived from Debian main). Disk footprint ~6 GB (Percona + xtrabackup add ~1 GB on top of the 0.G.2 baseline). ISO download cached under `packer_cache/` (unless `-var iso_url=H:/VMS/ISO/...` overrides to a local cache per `memory/project_iso_directory.md`).
+Per-template bake time + artifact:
 
-Output: `H:\VMS\NexusPlatform\_templates\oltp-node\oltp-node.vmx`.
+| Template | Bake time | Artifact | Footprint |
+|---|---|---|---|
+| `oltp-redis-node`    | ~8 min  | `H:\VMS\NexusPlatform\_templates\oltp-redis-node\oltp-redis-node.vmx`       | ~2.7 GB |
+| `oltp-mongo-node`    | ~8 min  | `H:\VMS\NexusPlatform\_templates\oltp-mongo-node\oltp-mongo-node.vmx`       | ~3.3 GB |
+| `oltp-pxc-node`      | ~9 min  | `H:\VMS\NexusPlatform\_templates\oltp-pxc-node\oltp-pxc-node.vmx`           | ~3.9 GB |
+| `oltp-proxysql-node` | ~10 min | `H:\VMS\NexusPlatform\_templates\oltp-proxysql-node\oltp-proxysql-node.vmx` | ~2.9 GB |
 
-Spot-check the built template before promoting to apply:
+Total ~35 min sequential (vs ~40-55 min for the legacy monolithic `oltp-node` which bundled everything in a single template — removed in 0.G.3.5c chunk 2). Each per-engine template is ~50-55% the footprint of the legacy monolithic.
+
+Spot-check any built template before promoting to apply:
 
 ```pwsh
-& 'C:\Program Files (x86)\VMware\VMware Workstation\vmrun.exe' start H:\VMS\NexusPlatform\_templates\oltp-node\oltp-node.vmx nogui
+& 'C:\Program Files (x86)\VMware\VMware Workstation\vmrun.exe' start H:\VMS\NexusPlatform\_templates\oltp-redis-node\oltp-redis-node.vmx nogui
 # Wait for boot, then SSH in with the build-time creds:
 ssh nexusadmin@<dhcp-assigned-IP>      # password: nexus-packer-build-only
-# Expected steady-state inside the template:
-systemctl is-active nexus-redis.service             # -> inactive (DISABLED; gates on /etc/nexus-redis/redis.conf)
-systemctl is-active nexus-mongo.service             # -> inactive (DISABLED; gates on /etc/nexus-mongo/mongod.conf)
-systemctl is-active nexus-percona.service           # -> inactive (DISABLED; gates on /etc/nexus-percona/my.cnf -- 0.G.3)
-systemctl is-active nexus-percona-bootstrap.service # -> inactive (DISABLED; only chunk 3c TF triggers this on pxc-node-1 for galera_new_cluster)
-systemctl is-active nexus-proxysql.service          # -> inactive (DISABLED; gates on /etc/proxysql.cnf -- 0.G.3)
-systemctl is-active oltp-node-firstboot.service     # -> inactive (only runs on a fresh clone, gated by /var/lib/oltp-node-firstboot-done)
-systemctl is-enabled redis-server.service           # -> masked (apt-shipped unit defensively masked)
-systemctl is-enabled mongod.service                 # -> masked
-systemctl is-enabled mysql.service                  # -> masked (Percona apt-shipped; would auto-bootstrap a junk cluster)
-systemctl is-enabled proxysql.service               # -> masked (vendor apt-shipped)
-redis-server --version                              # -> Redis server v=8.0.x (Debian 13.5 ships Redis 8.0.2)
-mongod --version                                    # -> db version v8.0.x
-mysqld --version                                    # -> Ver 8.0.x (Percona Server)
-xtrabackup --version                                # -> xtrabackup version 8.0.x (Percona; SST method)
-proxysql --version                                  # -> ProxySQL 2.6.x
-keepalived --version 2>&1 | head -1                 # -> Keepalived v2.x.x
-& 'C:\Program Files (x86)\VMware\VMware Workstation\vmrun.exe' stop H:\VMS\NexusPlatform\_templates\oltp-node\oltp-node.vmx hard
+# Per-engine steady-state checks (varies by template; redis shown):
+systemctl is-active nexus-redis.service       # -> inactive (DISABLED; gates on /etc/nexus-redis/redis.conf)
+systemctl is-enabled redis-server.service     # -> masked (apt-shipped unit defensively masked)
+redis-server --version                        # -> Redis server v=8.0.x
+# For mongo template: systemctl is-active nexus-mongo.service ; mongod --version
+# For pxc template:   systemctl is-active nexus-percona{,-bootstrap}.service ; mysqld --version ; xtrabackup --version
+# For proxysql template: systemctl is-active nexus-proxysql.service ; proxysql --version ; keepalived --version ; which mysql
+& 'C:\Program Files (x86)\VMware\VMware Workstation\vmrun.exe' stop H:\VMS\NexusPlatform\_templates\oltp-redis-node\oltp-redis-node.vmx hard
 ```
 
 ### §1.2 Cross-env operator order
@@ -127,12 +130,6 @@ keepalived --version 2>&1 | head -1                 # -> Keepalived v2.x.x
 │      The 3 cluster applies are INDEPENDENT (no inter-cluster dep) — run in     │
 │      any order, or in parallel terminals. Mongo+Percona apps will later        │
 │      consume each other only at the app layer, not at the infra layer.         │
-│                                                                                │
-│      Legacy monolithic path (DEPRECATED — being removed in 0.G.3.5c):          │
-│      nexus-infra-oltp\scripts\oltp.ps1 apply                                  │
-│        Single-state apply across all 14 VMs. Cross-cluster cascade risk        │
-│        (any version-bumped overlay forces unrelated cluster re-applies). Kept  │
-│        until per-cluster envs are live-proven on 0.G.3.5c.                     │
 └────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -140,104 +137,27 @@ keepalived --version 2>&1 | head -1                 # -> Keepalived v2.x.x
 
 **Within step 3**: 3a/3b/3c are independent — terraform states don't reference each other. The only practical ordering is "Redis before apps" (Redis is the fastest + most-used cache; bring it up first so other smoke tests have something to point at).
 
-### §1.3 Apply (numbered breakdown)
+### §1.3 Apply, §1.5 selective ops, §1.6 tear down → see §1.7
 
-```pwsh
-pwsh -File scripts\oltp.ps1 apply
-```
+The per-cluster operator scripts (`scripts/oltp-{redis,mongo,percona}.ps1`) are now the canonical interface. See **§1.7 Per-cluster scripts** below for:
 
-The terraform apply produces ~23 resources in a single graph, ordered via `depends_on`:
+- Full per-cluster cold-rebuild walkthrough (4 packer builds + 3 per-cluster cycles).
+- 8 copy-pasteable selective-ops `-Vars` examples (per-VM enable/disable, iterate one overlay, debug recipes).
+- Per-cluster tear-down (`pwsh -File scripts\oltp-<cluster>.ps1 destroy` — bounded to that cluster only; the other 2 stay live).
 
-| # | Resource | What it does |
-|---|---|---|
-| 1 | `module.redis_1..6.clone_vm` (×6) | `vmrun clone` from `oltp-node.vmx` → per-VM dir under `H:\VMS\NexusPlatform\05-oltp\<host>\`. |
-| 2 | `module.redis_1..6.configure_nic` (×6) | Rewrites cloned .vmx with VMnet11 + VMnet10 MACs. |
-| 3 | `module.redis_1..6.power_on` (×6) | `vmrun start`. firstboot runs inside the VM (NIC discovery → IP→role map → hostname → /etc/hosts → VMnet10 static → `node-identity.env` → marker). |
-| 4 | `null_resource.oltp_nftables_backplane` (×1) | Pushes the inlined nftables ruleset to all 6 nodes + `nft -f`. Waits per-node on `/var/lib/oltp-node-firstboot-done`. |
-| 5 | `null_resource.redis_vault_agent` (×6, `for_each`) | Installs Vault binary + 00-base.hcl + role-id/secret-id/CA bundle + nexus-vault-agent.service per node. Verifies token sink populated. |
-| 6 | `null_resource.redis_tls` (×6, `for_each`) | Drops 60-template-redis-tls.hcl + redis-tls-split.sh per node, restarts vault-agent, runs split → server.crt + server.key + ca.crt rendered into `/etc/nexus-redis/tls/`. |
-| 7 | `null_resource.redis_config` (×6, `for_each`) | Renders per-host redis.conf with `cluster-announce-ip = <VMnet11 IP>` → enables + restarts nexus-redis.service → verifies TLS PING returns PONG. |
-| 8 | `null_resource.redis_cluster_create` (×1) | Probe → `cluster_state:ok` ⇒ no-op; else `redis-cli --cluster create --tls ... --cluster-replicas 1 --cluster-yes`. Then 5-axis health verify + 4-key cross-shard SET/GET round-trip. **0.G.1 exit gate.** |
-| 9 | `module.mongo_{1,2,3}` + `null_resource.mongo_*` (0.G.2) | 3 VMs + 4 mongo overlays (vault-agents · tls · config · rs-initiate). RS bootstrap via `__system` cluster-auth + smoke-rw user created via RS URI auto-routing. **0.G.2 exit gate.** |
-| 10 | `module.pxc_node_{1,2,3}` + `module.proxysql_{1,2}` + 6 percona overlays (0.G.3) | 5 VMs + per-host vault-agents + 3-file TLS split + my.cnf/wsrep.cnf render + galera-cluster-bootstrap (probe→bootstrap pxc-node-1→users→sequential SST joiners) + proxysql-config + keepalived VRRP VIP. **0.G.3 exit gate.** |
-
-Wall-clock: ~10-15 min for 0.G.1 alone; ~20-30 min for the full 14-VM cold-rebuild (0.G.1 + 0.G.2 + 0.G.3 all enabled). Galera SST is the slowest single step (multi-GB transfer over VMnet10 backplane).
+The legacy monolithic `scripts/oltp.ps1` was removed in 0.G.3.5c chunk 2. Its old "apply ALL 14 VMs in one shot" semantics had no replacement and no need for one — per-cluster boundaries are the design point.
 
 ### §1.4 Verify the exit gate
 
 ```pwsh
-pwsh -File scripts\oltp.ps1 smoke -Phase 0.G.1
+pwsh -File scripts\oltp-redis.ps1   smoke   # 0.G.1: ~50 checks across 9 sections
+pwsh -File scripts\oltp-mongo.ps1   smoke   # 0.G.2: ~45 checks across 9 sections
+pwsh -File scripts\oltp-percona.ps1 smoke   # 0.G.3: ~80 checks across 12 sections
 ```
 
-Runs `scripts\smoke-0.G.1.ps1`: ~50 checks across 9 sections (reachability → firstboot → identity → vault-agent → TLS material → redis.conf → nexus-redis.service → TLS listener → cluster health + cross-shard round-trip). Each check echoes `[OK]/[FAIL]`; exits 1 on any failure, 0 on all-green.
+Each smoke script (`smoke-0.G.{1,2,3}.ps1` under the hood) runs reachability → firstboot → identity → vault-agent → TLS material → per-cluster config → service active → TLS listener → cluster health → end-to-end round-trip. Each check echoes `[OK]/[FAIL]`; exits 1 on any failure, 0 on all-green.
 
 Smoke is independent of apply — re-runnable any time against a stable cluster.
-
-### §1.5 Iterating (selective ops)
-
-Per `feedback_selective_provisioning.md` + `feedback_terraform_partial_apply_destroys_resources.md`: every toggle defaults to `true` (steady state). `-Vars` ONLY to opt-OUT.
-
-```pwsh
-# Skip the 3 sibling 0.G.* clusters (only Redis active in 0.G.1, but the
-# toggles already exist for forward compat with 0.G.2-0.G.7):
-pwsh -File scripts\oltp.ps1 apply -Vars enable_mongo=false,enable_percona=false,enable_patroni=false,enable_sql=false
-
-# Iterate on just the cluster-create step (assumes all 6 nodes already up
-# with TLS + nexus-redis.service active; useful when re-forming after a
-# manual `CLUSTER RESET`):
-pwsh -File scripts\oltp.ps1 apply -Vars enable_nftables_backplane=false,enable_redis_vault_agents=false,enable_redis_tls=false,enable_redis_config=false
-
-# Bring up only redis-1/2/3 (no replicas; cluster will fail health gate
-# but useful for debugging the master shards in isolation):
-pwsh -File scripts\oltp.ps1 apply -Vars enable_redis_4=false,enable_redis_5=false,enable_redis_6=false,enable_redis_cluster_create=false
-
-# Plan-only mode (safe dry run; useful to verify sidecar presence after
-# security env re-apply):
-pwsh -File scripts\oltp.ps1 plan
-
-# Re-render just one node's redis.conf (e.g. after manual edit drift) --
-# the oltp.ps1 wrapper does NOT pass through -target, so drop to terraform
-# directly:
-cd terraform\envs\oltp
-terraform apply -auto-approve -target='null_resource.redis_config["redis-3"]'
-cd -
-
-# 0.G.2 -- Bring up only mongo (skip redis + later 0.G.* clusters):
-pwsh -File scripts\oltp.ps1 apply -Vars enable_redis=false,enable_percona=false,enable_patroni=false,enable_sql=false
-
-# 0.G.2 -- Skip the rs-initiate step (e.g. when forming the RS manually
-# via mongosh for debugging):
-pwsh -File scripts\oltp.ps1 apply -Vars enable_mongo_rs_initiate=false
-
-# 0.G.3 -- Bring up only Percona/ProxySQL (skip redis + mongo + later clusters):
-pwsh -File scripts\oltp.ps1 apply -Vars enable_redis=false,enable_mongo=false,enable_patroni=false,enable_sql=false
-
-# 0.G.3 -- Bring up PXC nodes only, skip ProxySQL + VIP (useful for
-# debugging Galera in isolation):
-pwsh -File scripts\oltp.ps1 apply -Vars enable_proxysql_1=false,enable_proxysql_2=false,enable_proxysql_config=false,enable_keepalived_vip=false
-
-# 0.G.3 -- Skip galera-cluster-bootstrap (e.g. when bootstrapping
-# Galera manually via systemctl + mysql -e for debugging):
-pwsh -File scripts\oltp.ps1 apply -Vars enable_galera_cluster_bootstrap=false
-
-# 0.G.3 -- Skip keepalived VIP (PXC + ProxySQL up but apps hit
-# proxysql-1 directly on .54 instead of VIP .50):
-pwsh -File scripts\oltp.ps1 apply -Vars enable_keepalived_vip=false
-```
-
-### §1.6 Tear down
-
-```pwsh
-pwsh -File scripts\oltp.ps1 destroy
-```
-
-Destroy ordering is the reverse of apply (cluster-create destroy-time noop → redis_config stops service + removes redis.conf → redis_tls removes cert files + VA template → redis_vault_agent removes 00-base.hcl + creds + unit → nftables noop → module.vm stops + deletes VMs + per-VM dirs).
-
-**Survives across destroy/apply cycles** (preserved for cold-rebuild idempotency per `feedback_cold_rebuild_stale_kv_tokens.md`):
-
-- Gateway dnsmasq reservations (foundation env owns; not touched by oltp destroy)
-- Security env's PKI role + AppRole sidecars on the build host
-- The `oltp-node.vmx` Packer template (rebuild only if you bump Debian / Redis versions)
 
 **Wiped by destroy**:
 
@@ -245,9 +165,9 @@ Destroy ordering is the reverse of apply (cluster-create destroy-time noop → r
 - All cluster state (nodes.conf + AOF live inside the VMs)
 - No Vault KV bootstrap-token cleanup needed for 0.G.1 (Redis Cluster has no equivalent to consul/nomad bootstrap tokens; the AppRole secret-ids rotate every security apply anyway)
 
-### §1.7 Per-cluster scripts (Phase 0.G.3.5b)
+### §1.7 Per-cluster scripts (canonical interface)
 
-Three wrappers around the per-cluster terraform states, each mirroring `scripts/oltp.ps1`'s verb shape (`apply | destroy | smoke | cycle | plan | validate`):
+Three wrappers around the per-cluster terraform states, each with the standard verb shape (`apply | destroy | smoke | cycle | plan | validate`):
 
 | Script | Env | Template(s) | Smoke | VMs | Apply wall-clock |
 |---|---|---|---|---|---|
@@ -255,7 +175,7 @@ Three wrappers around the per-cluster terraform states, each mirroring `scripts/
 | `scripts/oltp-mongo.ps1` | `terraform/envs/oltp-mongo/` | `oltp-mongo-node.vmx` | `smoke-0.G.2.ps1` | 3 | ~5 min |
 | `scripts/oltp-percona.ps1` | `terraform/envs/oltp-percona/` | `oltp-pxc-node.vmx` + `oltp-proxysql-node.vmx` | `smoke-0.G.3.ps1` | 5 | ~10 min |
 
-**Full per-cluster cold-rebuild** (post 0.G.3.5c — after legacy `envs/oltp/` deleted):
+**Full per-cluster cold-rebuild:**
 
 ```pwsh
 # Pre-flight: foundation + security envs applied per §0
@@ -312,13 +232,13 @@ This is the key win over the legacy monolithic `oltp.ps1 destroy` which would te
 
 | Sub-phase | Cluster | TF | Packer | Smoke | Status | Closed |
 |---|---|---|---|---|---|---|
-| 0.G.1 | Redis Cluster (6 nodes) | `terraform/envs/oltp/` ✅ | `packer/oltp-node/` ✅ | `smoke-0.G.1.ps1` ✅ | ✅ PROVEN cold-rebuildable (2026-05-17) | 2026-05-17 |
-| 0.G.2 | MongoDB RS (3 nodes) | `terraform/envs/oltp/` (mongo overlays) ✅ | `packer/oltp-node/` (extended with oltp_mongo role) ✅ | `smoke-0.G.2.ps1` ✅ | ✅ PROVEN warm + cold-rebuild (2026-05-17) | 2026-05-17 |
-| 0.G.3 | Percona PXC + ProxySQL (5 nodes) | `terraform/envs/oltp/` (6 percona overlays) ✅ | `packer/oltp-node/` (extended with oltp_pxc + oltp_proxysql roles + 3 systemd units) ✅ | `scripts/smoke-0.G.3.ps1` ✅ | ⚠️ scaffolding complete + 16 ratification transients documented in §3.x; **live ratification deferred to Phase 0.G.3.5** (the monolithic oltp template + envs/oltp state proved too brittle; refactor splits into per-engine templates + per-cluster states per `memory/feedback_per_cluster_state_per_engine_template.md`) | 2026-05-18 (scaffolding); 0.G.3.5 follow-up |
-| 0.G.3.5a | per-engine Packer template refactor (4 NEW) | — | `packer/oltp-{redis,mongo,pxc,proxysql}-node/` ✅ | inherits per-engine smoke | ✅ template sources committed; bake time ~7-8 min each (smaller than monolithic ~40-55 min); 0.G.3.5c is the live bake + cold-rebuild | 2026-05-18 (sources) |
-| 0.G.3.5b | per-cluster Terraform state refactor (3 NEW) | `terraform/envs/oltp-{redis,mongo,percona}/` ✅ | reuses per-engine templates from 0.G.3.5a | inherits per-cluster smoke (`smoke-0.G.{1,2,3}.ps1`) | ✅ 3 envs scaffolded + `terraform init/validate/fmt -check` clean; 3 operator wrappers (`scripts/oltp-{redis,mongo,percona}.ps1`) ✅; live cycle deferred to 0.G.3.5c | 2026-05-18 (scaffolding) |
-| 0.G.3.5c chunk 1 | live cold-rebuild via per-cluster envs + permanent fixes for 11 new transients | reuses 0.G.3.5b states | rebuilds via 0.G.3.5a templates | smoke gates per cluster ALL GREEN | ✅ PROVEN cold-rebuildable end-to-end 2026-05-18; transients #16-#22 + 3 more documented in §3.x with permanent TF/Packer/smoke fixes baked | 2026-05-18 |
-| 0.G.3.5c chunk 2 | delete legacy `packer/oltp-node/` + `terraform/envs/oltp/` + `scripts/oltp.ps1` + CI matrix cleanup + close-out canon (MASTER-PLAN row, `vms.yaml`, glossary, ADRs) | — | — | — | pending: post-chunk-1 CI green | — |
+| 0.G.1 | Redis Cluster (6 nodes) | `terraform/envs/oltp-redis/` ✅ | `packer/oltp-redis-node/` ✅ | `smoke-0.G.1.ps1` ✅ | ✅ PROVEN cold-rebuildable (per-cluster: 2026-05-18; monolithic: 2026-05-17) | 2026-05-17 |
+| 0.G.2 | MongoDB RS (3 nodes) | `terraform/envs/oltp-mongo/` ✅ | `packer/oltp-mongo-node/` ✅ | `smoke-0.G.2.ps1` ✅ | ✅ PROVEN cold-rebuildable (per-cluster: 2026-05-18; monolithic: 2026-05-17) | 2026-05-17 |
+| 0.G.3 | Percona PXC + ProxySQL (5 nodes) | `terraform/envs/oltp-percona/` ✅ | `packer/oltp-pxc-node/` + `packer/oltp-proxysql-node/` ✅ | `smoke-0.G.3.ps1` ✅ | ✅ PROVEN cold-rebuildable end-to-end 2026-05-18 via per-cluster envs (16 monolithic-ratification transients + 11 refactor-ratification transients all root-caused + permanently fixed in source -- full table in §3.x) | 2026-05-18 |
+| 0.G.3.5a | per-engine Packer template refactor (4 NEW) | — | `packer/oltp-{redis,mongo,pxc,proxysql}-node/` ✅ | inherits per-engine smoke | ✅ live-baked 2026-05-18 in 0.G.3.5c chunk 1; bake time ~8-10 min each (smaller than legacy monolithic ~40-55 min) | 2026-05-18 |
+| 0.G.3.5b | per-cluster Terraform state refactor (3 NEW) | `terraform/envs/oltp-{redis,mongo,percona}/` ✅ | reuses 0.G.3.5a templates | per-cluster smoke gates | ✅ live-applied 2026-05-18 in 0.G.3.5c chunk 1; 3 operator wrappers `scripts/oltp-{redis,mongo,percona}.ps1` ✅ | 2026-05-18 |
+| 0.G.3.5c chunk 1 | live cold-rebuild via per-cluster envs + permanent fixes for 11 new transients | proves 0.G.3.5b states | builds 0.G.3.5a templates | smoke gates per cluster ALL GREEN | ✅ PROVEN end-to-end 2026-05-18 ([commit d076abd](https://github.com/grezap/nexus-infra-oltp/commit/d076abd)) | 2026-05-18 |
+| 0.G.3.5c chunk 2 | delete legacy `packer/oltp-node/` + `terraform/envs/oltp/` + `scripts/oltp.ps1` + CI matrix cleanup + handbook canonicalization | — | — | — | ✅ removed 2026-05-18 (this commit); CI matrix scoped to 4 per-engine templates + 3 per-cluster envs only | 2026-05-18 |
 | 0.G.4 | Patroni + etcd + HAProxy (7 nodes) | TBD | NEW oltp-patroni-node + oltp-etcd-node + oltp-haproxy-node (per-engine pattern from 0.G.3.5a) | `smoke-0.G.4.ps1` | not started | — |
 | 0.G.7 | SQL Server FCI + AG (4 ws2025 nodes) | TBD | NEW ws2025 template | `smoke-0.G.7.ps1` | not started | — |
 
@@ -328,29 +248,50 @@ This is the key win over the legacy monolithic `oltp.ps1 destroy` which would te
 
 ### §3.1 Cold-rebuild canon
 
-**Status: PROVEN (2026-05-17).** Cycle runs end-to-end with one well-known retry point (vmrun transient on `power_on`; see §3.x). The canonical sequence:
+**Status: PROVEN end-to-end via per-cluster envs (2026-05-18).** All 3 OLTP clusters rebuild from per-engine templates + per-cluster Terraform states; smoke gates ALL GREEN.
+
+Canonical per-cluster cycle (each cluster independent, can be ordered or parallel):
 
 ```pwsh
-# 1. Tear down everything below this tier (preserves foundation + security state)
 cd <repo-root>\workspace\nexus-infra-oltp
-pwsh -File scripts\oltp.ps1 destroy
 
-# 2. Re-apply (foundation + security stay live; this clones + brings up cold)
-pwsh -File scripts\oltp.ps1 apply
+# 1. Per-cluster destroy (bounded to that cluster only -- other 2 stay live)
+pwsh -File scripts\oltp-redis.ps1   destroy   # 6 redis VMs
+pwsh -File scripts\oltp-mongo.ps1   destroy   # 3 mongo VMs
+pwsh -File scripts\oltp-percona.ps1 destroy   # 5 percona VMs (3 PXC + 2 ProxySQL)
 
-# 3. Smoke
-pwsh -File scripts\oltp.ps1 smoke -Phase 0.G.1
+# 2. Per-cluster apply (foundation + security stay live; this clones + brings up cold)
+pwsh -File scripts\oltp-redis.ps1   apply
+pwsh -File scripts\oltp-mongo.ps1   apply
+pwsh -File scripts\oltp-percona.ps1 apply
+
+# 3. Per-cluster smoke
+pwsh -File scripts\oltp-redis.ps1   smoke    # 0.G.1 exit gate
+pwsh -File scripts\oltp-mongo.ps1   smoke    # 0.G.2 exit gate
+pwsh -File scripts\oltp-percona.ps1 smoke    # 0.G.3 exit gate
+
+# Shortcut: pwsh -File scripts\oltp-<cluster>.ps1 cycle does destroy -> apply -> smoke
 ```
 
-Wall-clock observed at ratification: destroy 30 s, apply 4 m 21 s (first attempt; redis-5 hit vmrun "Unknown error" — retry took another ~3 min), smoke 23 s. **Total ~8-12 min cold-rebuild** including the one retry. Fresh `packer build` (when the template doesn't exist or needs updating) adds ~7-8 min on top — see §1.1.
+Wall-clock observed at the 0.G.3.5c chunk 1 ratification 2026-05-18:
 
-Operator ratification checklist — all 3 verified 2026-05-17:
+| Cluster | Destroy | Apply (cold) | Smoke | Notes |
+|---|---|---|---|---|
+| oltp-redis    | ~20s | ~5-7 min   | ~25s | Best-case; #18 (orphan masters) needs live CLUSTER REPLICATE recovery first time |
+| oltp-mongo    | ~20s | ~5 min     | ~25s | Cleanest of the 3 |
+| oltp-percona  | ~30s | ~10-15 min | ~45s | Galera SST is slowest single step (multi-GB transfer over VMnet10 backplane) |
 
-- [x] Step 1 destroy: 38 resources destroyed; all 6 VMs gone from `H:\VMS\NexusPlatform\05-oltp\`; `terraform state list` empty.
-- [x] Step 2 apply: returns exit 0 (after one retry on the vmrun transient — see §3.x row for `vmrun start ... .vmx: Error: Unknown error`); `terraform output redis_endpoints` shows all 6 nodes.
-- [x] Step 3 smoke: all ~50 checks across 9 sections PASS; exit 0 with `ALL 0.G.1 SMOKE CHECKS PASSED` (`cluster_state:ok` + size=3 + known=6 + slots=16384 + 3 masters + 3 replicas + cross-shard SET/GET round-trip via `redis-cli -c`).
+**Total ~5-10 min per cluster** (vs ~30 min for the legacy monolithic 14-VM tree). Fresh `packer build` (when a template doesn't exist or needs updating) adds ~8-10 min per template — see §1.1. ISO download shared via `$env:PACKER_CACHE_DIR='H:\VMS\packer_cache'`.
 
-If a step fails (other than the documented vmrun transient that clears on retry), see §3.x below for the symptom→diagnosis→recovery table — 13 rows covering every transient surfaced during ratification.
+Operator ratification checklist — all 9 verified 2026-05-18 (3 clusters × 3 steps):
+
+- [x] **oltp-redis** destroy: 38 resources destroyed; all 6 VMs gone from `H:\VMS\NexusPlatform\05-oltp\redis-*/`; `terraform state list` empty.
+- [x] **oltp-redis** apply: returns exit 0 after one CLUSTER REPLICATE manual recovery (transient #18); `terraform output redis_endpoints` shows all 6 nodes; cluster shape 3 masters + 3 replicas + 16384 slots.
+- [x] **oltp-redis** smoke: `ALL 0.G.1 SMOKE CHECKS PASSED`.
+- [x] **oltp-mongo** destroy → apply → smoke clean: 3 VMs gone + re-cloned + RS nexus-rs at 1 PRIMARY + 2 SECONDARY; smoke `ALL 0.G.2 SMOKE CHECKS PASSED`.
+- [x] **oltp-percona** destroy → apply → smoke: 5 VMs gone + re-cloned; #16/#19/#20/#21/#22 surfaced + live-fixed; PXC cluster size=3 + Synced + Primary; ProxySQL admin :6032 shows 3 backends + galera_hostgroups; VIP .50 bound on proxysql-1 MASTER only; end-to-end write via VIP propagates to all 3 PXC backends; smoke `ALL 0.G.3 SMOKE CHECKS PASSED`.
+
+If a step fails (other than the documented vmrun transient that clears on retry), see §3.x below for the symptom→diagnosis→recovery table — 13 monolithic rows + 11 per-cluster-refactor rows covering every transient surfaced during both ratifications.
 
 ### §3.2 Build host reboot recovery
 
@@ -367,16 +308,16 @@ pwsh -File ..\nexus-infra-vmware\scripts\security.ps1 smoke -Phase 0.D.5
 |---|---|---|
 | `packer build` fails immediately with `Download failed bad response code: 404` | Debian dropped the pinned point release the same day a newer one published (mirror only keeps the *current* point under `13.x.y/`). | Bump `var.iso_url` + `var.iso_checksum` in `packer/oltp-node/variables.pkr.hcl` to match `https://cdimage.debian.org/debian-cd/current/amd64/iso-cd/SHA256SUMS`. Hit at 0.G.1 ratification 2026-05-17 when 13.4.0 → 13.5.0. |
 | `terraform plan` fails with `filesha256() failed: ...vault-agent-oltp-redis-redis-N.json missing` | Security env not applied (or apply was partial). | Run `nexus-infra-vmware\scripts\security.ps1 apply` first. |
-| `terraform apply` fails with `Module not installed` at module.redis_N | `.terraform/` directory missing (fresh clone or after a clean). | `oltp.ps1` now auto-runs `terraform init` when `.terraform/` is absent (added at 0.G.1 ratification 2026-05-17). For older script versions: `cd terraform\envs\oltp && terraform init`. |
-| `vmrun start ... .vmx`: `Error: Unknown error` (apply fails at module.redis_N.power_on within seconds of start) | Transient VMware Workstation flake under rapid destroy→create churn or high VM count on the host. No specific diagnostic surfaces; vmrun's "Unknown error" is the catch-all. Affects 1-2 nodes per cold-rebuild cycle in observation. | Re-run `pwsh -File scripts\oltp.ps1 apply`. Terraform sees the failed power_on as tainted; the retry runs `vmrun start` again and almost always succeeds the second time (idempotent — the .vmx is already configure_nic'd). Hit on redis-5 at 0.G.1 ratification cold-rebuild 2026-05-17; cleared on retry. |
+| `terraform apply` fails with `Module not installed` at module.redis_N | `.terraform/` directory missing (fresh clone or after a clean). | The per-cluster scripts auto-run `terraform init` when `.terraform/` is absent. For manual: `cd terraform\envs\oltp-<cluster> && terraform init`. |
+| `vmrun start ... .vmx`: `Error: Unknown error` (apply fails at module.redis_N.power_on within seconds of start) | Transient VMware Workstation flake under rapid destroy→create churn or high VM count on the host. No specific diagnostic surfaces; vmrun's "Unknown error" is the catch-all. Affects 1-2 nodes per cold-rebuild cycle in observation. | Re-run `pwsh -File scripts\oltp-<cluster>.ps1 apply`. Terraform sees the failed power_on as tainted; the retry runs `vmrun start` again and almost always succeeds the second time (idempotent — the .vmx is already configure_nic'd). Hit on redis-5 at 0.G.1 ratification cold-rebuild 2026-05-17; cleared on retry. |
 | Apply hangs on `[oltp-nftables] <ip>: waiting for SSH + firstboot marker...` for >20 min | Clone never finished firstboot (NIC discovery failure, hostname rename failure, or VMnet10 backplane misconfig). | SSH to `<ip>` with build-time creds; `sudo journalctl -u oltp-node-firstboot.service --no-pager`. Likely an unknown VMnet11 IP — check that the foundation dhcp-host reservation actually pinned the MAC to a known `.81/.82/.83/.84/.87/.89`. |
-| Apply fails at `[redis-va redis-N] AppRole login appears to have failed (token sink empty)` | Vault is sealed, OR the sidecar has a stale role-id/secret-id (security env was re-applied but sidecars weren't). | `pwsh -File ..\nexus-infra-vmware\scripts\security.ps1 apply` to regenerate sidecars, then re-run `oltp.ps1 apply`. |
+| Apply fails at `[redis-va redis-N] AppRole login appears to have failed (token sink empty)` | Vault is sealed, OR the sidecar has a stale role-id/secret-id (security env was re-applied but sidecars weren't). | `pwsh -File ..\nexus-infra-vmware\scripts\security.ps1 apply` to regenerate sidecars, then re-run `pwsh -File scripts\oltp-<cluster>.ps1 apply`. |
 | Apply fails at `[redis-tls redis-N] cert files not rendered ... within 60s` | Vault Agent template syntax error (rare; per-host CN/SAN substitution), OR the PKI role's `allowed_domains` doesn't cover the requested CN, OR `/etc/vault-agent/ca-bundle.crt` is missing (Vault Agent didn't install). | `ssh nexusadmin@<ip>; sudo journalctl -u nexus-vault-agent.service -n 50`. Check for `template syntax error` or `403 access denied`. Re-apply security env's `vault_pki_redis_role` if `allowed_domains` was outdated. |
 | Redis log spams `tlsv1 alert unknown ca` + smoke step 8 fails with `certificate verify failed` | `ca.crt` contains only the intermediate, not root+intermediate. OpenSSL strict X509 verify can't walk to a self-signed trust anchor with only the intermediate. | Fixed at `redis_tls_v=2` (split script now `cat $CA /etc/vault-agent/ca-bundle.crt > ca.crt`). Diagnosed at 0.G.1 ratification 2026-05-17. If you see this on an older overlay, bump `redis_tls_v` + re-apply. |
 | Apply fails at `[redis-config redis-N] nexus-redis.service / TLS PING did not converge within 20 min` | nexus-redis.service crashlooping OR Redis is up but rejecting connections (TLS chain issue per row above; OR `protected-mode` on Redis 8.0+ blocking external-IP connections). | `ssh nexusadmin@<ip>; sudo journalctl -u nexus-redis.service -n 50; sudo tail -50 /var/log/nexus-redis/redis.log`. Check that `/etc/nexus-redis/tls/server.key` starts with `-----BEGIN PRIVATE KEY-----` (PKCS#8). Check `/etc/nexus-redis/redis.conf` has `protected-mode no` (Redis 8.0 default is `yes`; fixed at `redis_config_v=2`). |
 | `[redis-cluster-create] cluster create did not report [OK] All 16384 slots covered` with `[ERR] ... DENIED Redis is running in protected mode` | Redis 8.0 default `protected-mode yes` refuses connections from non-loopback IPs when no `requirepass` is set. `redis-cli --cluster create` connects to each node via its VMnet11 IP. | Fixed at `redis_config_v=2` (`protected-mode no` added to rendered `redis.conf`). Defense-in-depth is preserved: nftables + tls-port + tls-auth-clients. Diagnosed at 0.G.1 ratification 2026-05-17. |
 | Cluster forms with `4 masters + 2 replicas` instead of `3+3` (smoke step 9 master/replica count fails) | Cluster_create probe found `cluster_state:ok` and skipped create, but the cluster was left in a partial state by a prior interrupted apply (e.g. some `CLUSTER MEET` messages succeeded before a fatal error). | Manual recovery: SSH to each of the 6 nodes and run `sudo redis-cli -h 127.0.0.1 -p 6379 --tls --cacert /etc/nexus-redis/tls/ca.crt --cert /etc/nexus-redis/tls/server.crt --key /etc/nexus-redis/tls/server.key CLUSTER RESET HARD`. Then on redis-1 run `sudo redis-cli --tls ... --cluster create 192.168.70.81:6379 192.168.70.82:6379 192.168.70.83:6379 192.168.70.84:6379 192.168.70.87:6379 192.168.70.89:6379 --cluster-replicas 1 --cluster-yes`. (Future TF improvement: extend the cluster_create probe to also verify shape, not just state=ok.) Hit at 0.G.1 ratification 2026-05-17. |
-| Apply fails at `cluster did not converge to (state=ok, size=3, known=6, slots=16384) within 20 min` | Cluster bus blocked between nodes. | Check nftables on each node: `sudo nft list ruleset | grep -E '6379|16379'`. The 3c overlay should have opened both ports. If missing, re-run `oltp.ps1 apply -- -target='null_resource.oltp_nftables_backplane'`. |
+| Apply fails at `cluster did not converge to (state=ok, size=3, known=6, slots=16384) within 20 min` | Cluster bus blocked between nodes. | Check nftables on each node: `sudo nft list ruleset \| grep -E '6379\|16379'`. The 3c overlay should have opened both ports. If missing, `cd terraform\envs\oltp-redis && terraform apply -auto-approve -target='null_resource.redis_nftables_backplane[0]'`. |
 | smoke step 9 round-trip fails with `MOVED` but no follow-through | Client not in cluster mode (`-c` flag missing) OR slot table inconsistent. | Verify `redis-cli ... cluster slots` returns 3 ranges totaling 16384. If not, `redis-cli --cluster fix <ip>:6379 --tls --cacert ...`. |
 | Harmless systemd warning `Unknown key 'StartLimitIntervalSec' in section [Service], ignoring` | `StartLimitIntervalSec`/`StartLimitBurst` were in `[Service]` instead of `[Unit]` in nexus-redis.service.j2. systemd ignores them (service still starts) but rate-limiting protection is disabled. | Fixed at 0.G.1 ratification 2026-05-17 -- moved both keys to `[Unit]`. Takes effect on the next Packer template rebuild + clone (existing clones keep the warning until rebuilt). |
 | MongoDB `createUser` fails with `not authorized on admin to execute command { createUser ... }` even with `enableLocalhostAuthBypass: true` in mongod.conf | MongoDB 8.0 + `security.keyFile` + `security.authorization=enabled` DOES NOT activate the localhost-exception even when the bypass setParameter is set. The bypass parameter loads into config but the runtime check still requires auth. Confirmed via `getCmdLineOpts` (also blocked) and via testing both `--host 127.0.0.1` and `--host localhost`. | Use `__system` cluster auth instead: `sudo mongosh --tls ... --username __system --password $(sudo cat /etc/nexus-mongo/keyfile) --authenticationDatabase local --authenticationMechanism SCRAM-SHA-256`. This is the keyFile-derived internal cluster user (root-equivalent privs). Per MongoDB docs, `__system` is "discouraged but supported" for operator use — acceptable for one-shot bootstrap. Wired into `role-overlay-mongo-rs-initiate.tf` v5+. Diagnosed at 0.G.2 ratification 2026-05-17. |
