@@ -160,8 +160,8 @@ build {
       "../_shared/ansible/roles/nexus_observability",
       "ansible/roles/oltp_redis",
       "ansible/roles/oltp_mongo",
-      "ansible/roles/oltp_pxc",       # 0.G.3 Percona XtraDB Cluster + Galera
-      "ansible/roles/oltp_proxysql",  # 0.G.3 ProxySQL + keepalived
+      "ansible/roles/oltp_pxc",      # 0.G.3 Percona XtraDB Cluster + Galera
+      "ansible/roles/oltp_proxysql", # 0.G.3 ProxySQL + keepalived
     ]
     extra_arguments = [
       "--extra-vars", "target_user=${var.ssh_username}",
