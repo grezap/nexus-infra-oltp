@@ -1,0 +1,49 @@
+[Unit]
+Description=Nexus Redis (cluster node)
+Documentation=https://redis.io/docs/management/scaling/
+After=network-online.target oltp-node-firstboot.service
+Wants=network-online.target
+Requires=oltp-node-firstboot.service
+# Delivered DISABLED by the oltp_redis Packer role. role-overlay-redis-config.tf
+# renders {{ oltp_node_config_dir }}/redis.conf (which needs Terraform-time
+# per-host cluster-announce-ip), then enables + starts this unit.
+ConditionPathExists={{ oltp_node_config_dir }}/redis.conf
+# StartLimit* live in [Unit], NOT [Service] (systemd silently ignores them
+# in [Service] with a Warning). Generous limits so a slow-to-boot peer
+# doesn't make systemd give up on cluster-bus rejoin -- mirrors the
+# vault-transit-boot-race + kafka KRaft controller-quorum lesson
+# (memory/feedback_vault_transit_boot_race_recovery.md). Moved here at
+# 0.G.1 ratification fix 2026-05-17 (was in [Service]; harmless warning).
+StartLimitBurst=15
+StartLimitIntervalSec=600
+
+[Service]
+# Type=simple (NOT notify): the apt-installed redis-server may not be built
+# with libsystemd, and even when it is, Type=notify makes a slow handshake
+# trip TimeoutStartSec=. The 3c role-overlay-redis-config.tf has its own
+# TLS PING readiness probe. simple is safe + sufficient. (Same shape as
+# kafka.service.)
+Type=simple
+User={{ oltp_node_user }}
+Group={{ oltp_node_group }}
+EnvironmentFile=-{{ oltp_node_config_dir }}/node-identity.env
+ExecStart=/usr/bin/redis-server {{ oltp_node_config_dir }}/redis.conf
+# No ExecStop= -- systemd's default SIGTERM is a graceful shutdown for
+# Redis (AOF sync + close). `redis-cli shutdown` would need the TLS flags
+# (--tls --cacert --cert --key) since 3c's redis.conf disables the plain
+# port (`port 0` + `tls-port 6379`), and threading those through here is
+# brittle; SIGTERM is simpler + safer.
+Restart=on-failure
+RestartSec=10
+# RuntimeDirectory= -- systemd auto-creates /run/nexus-redis on every
+# service start (per memory/feedback_systemd_runtime_directory_tmpfs.md;
+# /var/run is tmpfs and an install-time mkdir does not survive reboot).
+# redis.conf points pidfile + unixsocket here.
+RuntimeDirectory=nexus-redis
+RuntimeDirectoryMode=0755
+LimitNOFILE=1048576
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

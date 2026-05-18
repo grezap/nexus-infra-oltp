@@ -1,0 +1,20 @@
+---
+# oltp_pxc role defaults
+
+# Percona XtraDB Cluster major series. Installed via the Percona vendor APT
+# repo (percona-release tool, setup pxc-80). The repo path bakes the major
+# version; bumping this requires re-running `percona-release setup pxc-XX`.
+oltp_node_pxc_version: "8.0"
+
+# System account every Percona/MySQL service runs as. The apt-installed
+# percona-xtradb-cluster-server package creates the mysql user+group; the
+# role task verifies presence (idempotent no-op when apt already created
+# them).
+oltp_node_pxc_user: mysql
+oltp_node_pxc_group: mysql
+
+# Per-node dirs (config + cert material + data + log rendered by Terraform
+# role-overlay-percona-*.tf in nexus-infra-oltp).
+oltp_node_pxc_config_dir: /etc/nexus-percona
+oltp_node_pxc_data_dir: /var/lib/nexus-percona
+oltp_node_pxc_log_dir: /var/log/nexus-percona

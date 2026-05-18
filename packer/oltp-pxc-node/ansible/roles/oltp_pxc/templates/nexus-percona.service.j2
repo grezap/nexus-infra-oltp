@@ -1,0 +1,53 @@
+[Unit]
+Description=Nexus Percona XtraDB Cluster (Galera-replicated MySQL data plane)
+Documentation=https://docs.percona.com/percona-xtradb-cluster/8.0/
+After=network-online.target oltp-node-firstboot.service
+Wants=network-online.target
+Requires=oltp-node-firstboot.service
+# Delivered DISABLED by the oltp_pxc Packer role. role-overlay-percona-
+# config.tf renders {{ oltp_node_pxc_config_dir }}/my.cnf + wsrep.cnf,
+# role-overlay-percona-tls.tf has already rendered server-cert.pem +
+# server-key.pem + ca.pem + 3 KV secret files, and role-overlay-percona-
+# galera-bootstrap.tf orchestrates the cluster-aware start (either via
+# this unit on a JOINER after the bootstrap node is up, or after the
+# bootstrap node hands off from nexus-percona-bootstrap.service to this
+# regular unit).
+ConditionPathExists={{ oltp_node_pxc_config_dir }}/my.cnf
+ConditionPathExists={{ oltp_node_pxc_config_dir }}/wsrep.cnf
+# Conflicts with the bootstrap unit -- can't have both running at once on
+# the same node. systemd auto-stops bootstrap unit when this one starts.
+Conflicts=nexus-percona-bootstrap.service
+# StartLimit* in [Unit] per systemd.unit(5) (the 0.G.1 ratification lesson).
+# Generous limits so SST/IST first-cluster-formation doesn't make systemd
+# give up -- multi-GB xtrabackup transfers can take 5+ min on the lab's
+# disks. Same shape as nexus-redis / nexus-mongo / kafka-broker.
+StartLimitBurst=15
+StartLimitIntervalSec=600
+
+[Service]
+# Type=simple (NOT notify): Percona's mysqld supports systemd notify via
+# the systemd integration but the chunk 3c galera-bootstrap overlay has
+# its own readiness probe (mysql -e 'SELECT 1' via socket). simple is
+# safe + sufficient. Matches the nexus-redis / nexus-mongo pattern.
+Type=simple
+User={{ oltp_node_pxc_user }}
+Group={{ oltp_node_pxc_group }}
+ExecStart=/usr/sbin/mysqld --defaults-file={{ oltp_node_pxc_config_dir }}/my.cnf
+# Graceful SIGTERM: mysqld flushes InnoDB redo + xtradb buffer pool +
+# closes Galera replication channel cleanly. No ExecStop= needed.
+Restart=on-failure
+RestartSec=10
+# RuntimeDirectory= -- systemd auto-creates /run/nexus-percona on every
+# service start (per memory/feedback_systemd_runtime_directory_tmpfs.md;
+# /var/run is tmpfs and an install-time mkdir does not survive reboot).
+# my.cnf points pidFilePath + socket here.
+RuntimeDirectory=nexus-percona
+RuntimeDirectoryMode=0755
+LimitNOFILE=64000
+LimitNPROC=64000
+TasksMax=infinity
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

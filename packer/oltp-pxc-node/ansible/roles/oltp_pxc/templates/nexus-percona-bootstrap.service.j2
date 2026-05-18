@@ -1,0 +1,44 @@
+[Unit]
+Description=Nexus Percona XtraDB Cluster -- BOOTSTRAP mode (galera_new_cluster, --wsrep-new-cluster)
+Documentation=https://docs.percona.com/percona-xtradb-cluster/8.0/bootstrap.html
+After=network-online.target oltp-node-firstboot.service
+Wants=network-online.target
+Requires=oltp-node-firstboot.service
+# Delivered DISABLED by the oltp_pxc Packer role. role-overlay-percona-
+# galera-bootstrap.tf (chunk 3c) starts this unit on pxc-node-1 ONLY when
+# no cluster exists -- it sets wsrep_cluster_address to gcomm:// (empty
+# peer list = bootstrap mode) regardless of what's in wsrep.cnf. Once
+# users are created + sst-auth.cnf is written, this unit is stopped and
+# nexus-percona.service starts (which reads the canonical full-peer-list
+# wsrep_cluster_address).
+#
+# DANGEROUS to start on multiple nodes simultaneously -- creates a SPLIT
+# BRAIN that can corrupt data. The TF overlay's probe-then-bootstrap
+# guard ensures only one node runs galera_new_cluster per cluster lifetime.
+ConditionPathExists={{ oltp_node_pxc_config_dir }}/my.cnf
+ConditionPathExists={{ oltp_node_pxc_config_dir }}/wsrep.cnf
+# Conflicts with the regular unit -- can't have both at once.
+Conflicts=nexus-percona.service
+StartLimitBurst=10
+StartLimitIntervalSec=600
+
+[Service]
+# Same Type / User / dirs as nexus-percona.service. The ONLY difference
+# is --wsrep-new-cluster on the mysqld command line, which makes Galera
+# bootstrap a brand-new cluster (skips the gcomm:// peer discovery).
+Type=simple
+User={{ oltp_node_pxc_user }}
+Group={{ oltp_node_pxc_group }}
+ExecStart=/usr/sbin/mysqld --defaults-file={{ oltp_node_pxc_config_dir }}/my.cnf --wsrep-new-cluster
+Restart=on-failure
+RestartSec=10
+RuntimeDirectory=nexus-percona
+RuntimeDirectoryMode=0755
+LimitNOFILE=64000
+LimitNPROC=64000
+TasksMax=infinity
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

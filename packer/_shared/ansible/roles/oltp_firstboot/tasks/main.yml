@@ -1,0 +1,40 @@
+---
+# oltp_firstboot -- shared role that installs the OLTP-tier firstboot
+# script + systemd unit on any per-engine template (oltp-{redis,mongo,pxc,
+# proxysql}-node).
+#
+# Created at Phase 0.G.3.5 refactor: previously the firstboot was bundled
+# inside oltp_redis. Moved here so the per-engine mongo / pxc / proxysql
+# templates can install it without depending on oltp_redis.
+#
+# The firstboot script (files/oltp-node-firstboot.sh) is cluster-agnostic:
+# it does NIC discovery + IP→hostname mapping across ALL OLTP-tier IPs
+# (redis .81-.84/.87/.89, mongo .71/.72/.73, pxc .51/.52/.53, proxysql
+# .54/.55). Inert IPs on a given clone (e.g. a mongo-1 clone seeing a
+# pxc-node-2 row in the map) just don't match the clone's own DHCP IP +
+# get skipped.
+#
+# The systemd unit (templates/oltp-node-firstboot.service.j2) gates on
+# the firstboot done-marker so the script runs exactly once per clone.
+
+- name: Install oltp-node-firstboot.sh
+  ansible.builtin.copy:
+    src: oltp-node-firstboot.sh
+    dest: /usr/local/sbin/oltp-node-firstboot.sh
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Install oltp-node-firstboot.service systemd unit
+  ansible.builtin.template:
+    src: oltp-node-firstboot.service.j2
+    dest: /etc/systemd/system/oltp-node-firstboot.service
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Enable oltp-node-firstboot.service (runs once on first clone boot)
+  ansible.builtin.systemd:
+    name: oltp-node-firstboot.service
+    enabled: true
+    daemon_reload: true

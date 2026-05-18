@@ -1,0 +1,20 @@
+---
+# oltp_redis role defaults
+
+# Version control: 'apt-default' = Debian 13's bundled redis-server package
+# (currently 7.4.x; sufficient for 0.G.1 since the 6-node cluster does not
+# use Redis 7.2+-only features). Override the role's apt task to consume
+# packages.redis.io if a specific upstream pin is needed.
+oltp_node_redis_version: apt-default
+
+# System account every Redis-family service runs as. The apt-installed
+# redis-server package creates the redis user+group already; the role
+# task verifies presence (idempotent no-op when apt already created them).
+oltp_node_user: redis
+oltp_node_group: redis
+
+# Per-node dirs (config rendered by Terraform role-overlay-redis-config.tf;
+# TLS material rendered by role-overlay-redis-tls.tf into <config_dir>/tls).
+oltp_node_config_dir: /etc/nexus-redis
+oltp_node_data_dir: /var/lib/nexus-redis
+oltp_node_log_dir: /var/log/nexus-redis

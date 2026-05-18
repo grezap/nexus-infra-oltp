@@ -1,0 +1,25 @@
+---
+# oltp-pxc-node -- Ansible playbook (local, run by Packer ansible-local
+# provisioner)
+#
+# Per-engine template per the 0.G.3.5 refactor (memory/feedback_per_cluster_
+# state_per_engine_template.md): ONLY installs Percona XtraDB Cluster (PXC).
+# proxysql lives in oltp-proxysql-node; redis + mongo in their own templates.
+
+- name: Configure oltp-pxc-node template (Phase 0.G.3.5+)
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+
+  vars:
+    target_user: "{{ target_user | default('nexusadmin') }}"
+    oltp_node_pxc_version: "{{ oltp_node_pxc_version | default('8.0') }}"
+
+  roles:
+    - nexus_identity
+    - nexus_network
+    - nexus_firewall
+    - nexus_observability
+    - oltp_firstboot
+    - oltp_pxc

@@ -1,0 +1,28 @@
+---
+# oltp-redis-node -- Ansible playbook (local, run by Packer ansible-local
+# provisioner)
+#
+# Per-engine template per the 0.G.3.5 refactor (memory/feedback_per_cluster_
+# state_per_engine_template.md): ONLY installs Redis. mongo / pxc / proxysql
+# live in their own sibling oltp-<engine>-node templates.
+#
+# Order: nexus_identity (sshd) -> nexus_network (NIC rename) -> nexus_firewall
+# (rules need nic0/nic1 to exist) -> nexus_observability -> oltp_redis.
+
+- name: Configure oltp-redis-node template (Phase 0.G.3.5+)
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+
+  vars:
+    target_user: "{{ target_user | default('nexusadmin') }}"
+    oltp_node_redis_version: "{{ oltp_node_redis_version | default('apt-default') }}"
+
+  roles:
+    - nexus_identity
+    - nexus_network
+    - nexus_firewall
+    - nexus_observability
+    - oltp_firstboot
+    - oltp_redis

@@ -1,0 +1,25 @@
+---
+# oltp-mongo-node -- Ansible playbook (local, run by Packer ansible-local
+# provisioner)
+#
+# Per-engine template per the 0.G.3.5 refactor (memory/feedback_per_cluster_
+# state_per_engine_template.md): ONLY installs MongoDB. redis / pxc /
+# proxysql each ship in their own sibling oltp-<engine>-node template.
+
+- name: Configure oltp-mongo-node template (Phase 0.G.3.5+)
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+
+  vars:
+    target_user: "{{ target_user | default('nexusadmin') }}"
+    oltp_node_mongodb_version: "{{ oltp_node_mongodb_version | default('8.0') }}"
+
+  roles:
+    - nexus_identity
+    - nexus_network
+    - nexus_firewall
+    - nexus_observability
+    - oltp_firstboot
+    - oltp_mongo

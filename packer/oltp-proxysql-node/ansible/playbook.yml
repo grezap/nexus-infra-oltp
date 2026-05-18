@@ -1,0 +1,25 @@
+---
+# oltp-proxysql-node -- Ansible playbook (local, run by Packer ansible-local
+# provisioner)
+#
+# Per-engine template per the 0.G.3.5 refactor (memory/feedback_per_cluster_
+# state_per_engine_template.md): ONLY installs ProxySQL + keepalived.
+# PXC backends live in oltp-pxc-node; redis + mongo in their own templates.
+
+- name: Configure oltp-proxysql-node template (Phase 0.G.3.5+)
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+
+  vars:
+    target_user: "{{ target_user | default('nexusadmin') }}"
+    oltp_node_proxysql_version: "{{ oltp_node_proxysql_version | default('2.6') }}"
+
+  roles:
+    - nexus_identity
+    - nexus_network
+    - nexus_firewall
+    - nexus_observability
+    - oltp_firstboot
+    - oltp_proxysql
