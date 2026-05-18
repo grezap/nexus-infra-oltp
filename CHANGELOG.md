@@ -55,6 +55,39 @@ All 16 transients are documented in `docs/handbook.md` §3.x with symptom → di
 - `docs/handbook.md`: §0 prereqs extended with v3 dhcp + percona Vault state; §1.1 packer build time bumped to 40-55 min + expanded spot-check; §1.2 cross-env order extended with 0.G.3 sidecars; §1.3 apply breakdown +percona row; §1.5 +5 0.G.3 -Vars examples; §2 phase table flipped 0.G.3 from "not started" → "scaffolding complete + ratification documented"; §3.x +2 lint-time transient rows.
 - `README.md`: phase badge "0.G.1 + 0.G.2 both proven" → "0.G.1 + 0.G.2 proven · 0.G.3 scaffolding complete"; sub-phase table 0.G.3 row updated.
 
+### Added — Phase 0.G.3.5a (per-engine Packer templates) + 0.G.3.5b (per-cluster Terraform states + operator wrappers) (2026-05-18)
+
+**Why**: 0.G.3 ratification hit 16 transients on the monolithic `packer/oltp-node/` template + `terraform/envs/oltp/` state. Iteration loop was ~30 min wall-clock for any single-cluster fix because every overlay change cascaded across the 14-VM tree. Per `memory/feedback_per_cluster_state_per_engine_template.md` the architectural canon is: **per-engine Packer template + per-cluster Terraform state for every multi-cluster infrastructure tier**.
+
+**0.G.3.5a — 4 NEW per-engine Packer templates** ([commit `61ebad8`](https://github.com/grezap/nexus-infra-oltp/commit/61ebad8)):
+
+- `packer/_shared/ansible/roles/oltp_firstboot/` (NEW, 3 files): hoisted firstboot logic out of `oltp_redis` into a shared role. Same IP→hostname→cluster→IDENTITY_DIR map (5 percona-tier rows + 3 mongo + 6 redis), same systemd unit. All 4 per-engine templates depend on it.
+- `packer/oltp-redis-node/` (NEW, ~12 files): split from the monolithic oltp-node. `role_paths` = `[oltp_firstboot, oltp_redis]`. Drops `oltp_mongo` + `oltp_pxc` + `oltp_proxysql`. Bake time ~7-8 min vs ~40-55 min for monolithic. Output: `H:\VMS\NexusPlatform\_templates\oltp-redis-node\oltp-redis-node.vmx`.
+- `packer/oltp-mongo-node/` (NEW, ~12 files): `role_paths` = `[oltp_firstboot, oltp_mongo]`. Same trim.
+- `packer/oltp-pxc-node/` (NEW, ~12 files): `role_paths` = `[oltp_firstboot, oltp_pxc]`. **Carries all 12 PXC-specific transient fixes from 0.G.3 ratification** baked into the Ansible role (skip `percona-release setup`, manual GPG keyring extraction, bookworm libaio1+libldap-2.5-0 pin, datadir initialization, AppArmor mysqld profile disable, `nexus-pxc-mysql` try-then-fallback wrapper, sst-auth.cnf, etc.).
+- `packer/oltp-proxysql-node/` (NEW, ~12 files): `role_paths` = `[oltp_firstboot, oltp_proxysql]`. Carries the ProxySQL flat-repo URL fix + apt-default `proxysql.service` mask defense.
+- Shared scaffolding (`files/chrony.conf`, `files/nftables.conf`, `http/preseed.cfg`) duplicated per template (each template independently `packer init`-able; matches `nexus-infra-kafka/packer/kafka-node` per-template pattern).
+
+48 files, 3423 insertions. `packer fmt -recursive` clean.
+
+**0.G.3.5b — 3 NEW per-cluster Terraform states + operator wrappers** ([commit `ad4f563`](https://github.com/grezap/nexus-infra-oltp/commit/ad4f563) + the scripts in this commit):
+
+- `terraform/envs/oltp-redis/` (NEW, ~9 files): 6 redis module.vm blocks pointing at `oltp-redis-node.vmx`. 5 overlays copied from monolithic envs/oltp/ with sed rewires (`oltp_nftables_backplane` → `redis_nftables_backplane`; dropped `var.enable_redis &&` cross-cluster guards). NEW `role-overlay-redis-nftables-backplane.tf` opens only redis ports (22 + 6379 + 16379 + VMnet10 trust) — no more cross-cluster MySQL/MongoDB/ProxySQL ports leaking into redis-tier nftables.
+- `terraform/envs/oltp-mongo/` (NEW, ~9 files): 3 mongo module.vm blocks pointing at `oltp-mongo-node.vmx`. Same per-cluster nftables pattern (22 + 27017 + VMnet10 trust).
+- `terraform/envs/oltp-percona/` (NEW, ~11 files): 5 module.vm blocks (3 PXC pointing at `oltp-pxc-node.vmx` + 2 ProxySQL pointing at `oltp-proxysql-node.vmx`) + `proxysql_vip = 192.168.70.50`. Per-cluster nftables opens 22 + 3306 + 6032 + 6033 + VRRP proto 112 + VMnet10 trust.
+- 6 percona overlays carried forward with all 0.G.3 ratification fixes baked: vault-agents (5 hosts), tls (3-file split + 3 KV cluster-creds per node, role-differentiated PXC vs ProxySQL), config (PXC-only my.cnf + wsrep.cnf with `!include` + trailing blank line fix from transient #10), galera-bootstrap v3 (bootstrap-then-joiners ordering fix from transient #15), proxysql-config, proxysql-keepalived.
+- All 3 envs validate clean (`terraform init`, `terraform validate`, `terraform fmt -check`).
+- `scripts/oltp-redis.ps1` + `scripts/oltp-mongo.ps1` + `scripts/oltp-percona.ps1` (NEW, this commit): operator wrappers around the 3 per-cluster envs. Mirror `scripts/oltp.ps1`'s verb shape (`apply | destroy | smoke | cycle | plan | validate`) but bounded to one cluster each. `cycle` = per-cluster `destroy → apply → smoke` in ~5-10 min vs ~30 min for the legacy monolithic `oltp.ps1 cycle`.
+- `docs/handbook.md` updated: status header marks 0.G.3.5 in flight; §1.2 cross-env order documents both monolithic (deprecated) and per-cluster (canonical going forward) paths; **NEW §1.7 per-cluster scripts** with full cold-rebuild walkthrough + per-cluster selective-ops `-Vars` examples (PXC-only without ProxySQL, re-iterate galera-bootstrap one-shot, skip VIP, etc.); §2 phase table grows 0.G.3.5a/b/c rows.
+
+**What 0.G.3.5b explicitly DEFERS to 0.G.3.5c**:
+- Live `packer build` of the 4 new per-engine templates
+- Live cold-rebuild via the 3 per-cluster envs
+- Live re-ratification of Percona (transient #16: joiner SST didn't converge under the monolithic loop; ~10 min iteration loop now should make root-cause tractable)
+- Removal of legacy `packer/oltp-node/` + `terraform/envs/oltp/` + `scripts/oltp.ps1` after the 3 new envs are live-proven
+
+**Legacy oltp env left in place** until 0.G.3.5c lands, so existing `oltp.ps1` commands still work for operators mid-iteration.
+
 ### Verified + Fixed — Phase 0.G.2 ratification (2026-05-17)
 
 Live ratification cycle (foundation → security → packer build → oltp apply → smoke + 0.G.1 regression) **ALL GREEN end-to-end** after 7 iterations of the oltp apply path surfacing 7 distinct bugs / MongoDB-8.0 behavior changes. All fixes in TF + Packer + smoke. Cluster proven: 3-member RS `nexus-rs` live on mTLS + keyFile internal auth + smoke-rw SCRAM RBAC user + write/read round-trip via `readPreference=secondary` + `readConcern=majority`.

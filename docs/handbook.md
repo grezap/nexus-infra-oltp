@@ -1,9 +1,20 @@
 # nexus-infra-oltp operator handbook
 
-> **Status (Phase 0.G.1 + 0.G.2 + 0.G.3):** ✅ 0.G.1 (Redis) + 0.G.2 (MongoDB)
+> **Status (Phase 0.G.1 + 0.G.2 + 0.G.3 + 0.G.3.5):** ✅ 0.G.1 (Redis) + 0.G.2 (MongoDB)
 > **PROVEN cold-rebuildable (2026-05-17)**. 0.G.3 (Percona XtraDB Cluster +
-> ProxySQL) scaffolding complete + live ratification documented below. Full
-> destroy → apply → smoke cycle verified live for 0.G.1 + 0.G.2; 0.G.3
+> ProxySQL) scaffolding complete + 16 ratification transients documented in
+> §3.x. **0.G.3.5 refactor in flight 2026-05-18**: monolithic
+> `packer/oltp-node/` split into 4 per-engine Packer templates
+> (`packer/oltp-{redis,mongo,pxc,proxysql}-node/`); monolithic
+> `terraform/envs/oltp/` split into 3 per-cluster states
+> (`terraform/envs/oltp-{redis,mongo,percona}/`) with per-cluster nftables
+> overlays + per-cluster operator scripts (`scripts/oltp-{redis,mongo,percona}.ps1`).
+> Per `memory/feedback_per_cluster_state_per_engine_template.md` — iteration
+> loop shrinks from ~30 min (14-VM tree apply) to ~5-10 min per cluster
+> (6/3/5 VMs). 0.G.3.5a (templates) + 0.G.3.5b (states + scripts) committed;
+> 0.G.3.5c (live cold-rebuild + delete legacy + re-ratify Percona transient
+> #16) is the next live step. Full destroy → apply → smoke cycle verified
+> live for 0.G.1 + 0.G.2 against the legacy monolithic state; 0.G.3 + 0.G.3.5
 > ratification status in §2.
 >
 > Follows the 9-section structure mandated by `feedback_handbook_standard.md`
@@ -98,16 +109,31 @@ keepalived --version 2>&1 | head -1                 # -> Keepalived v2.x.x
 │               4 KV sticky-seeds (cluster + monitor + root + proxysql-admin)    │
 │      (All toggles default true; no override needed for steady-state apply.)    │
 │                                                                                │
-│ 3. nexus-infra-oltp\scripts\oltp.ps1 apply                                    │
-│      reads ALL cluster sidecars at plan time + clones + brings up:             │
-│        6 redis + 3 mongo + 5 percona (3 PXC + 2 ProxySQL) = 14 VMs.            │
-│        Per-cluster role overlays start the right services per host (chunk 3c   │
-│        galera_new_cluster on pxc-node-1, sequential SST joiners on -2/-3,     │
-│        chunk 3d ProxySQL+keepalived VIP).                                      │
+│ 3a. nexus-infra-oltp\scripts\oltp-redis.ps1   apply  (6 VMs;  ~5  min)        │
+│ 3b. nexus-infra-oltp\scripts\oltp-mongo.ps1   apply  (3 VMs;  ~5  min)        │
+│ 3c. nexus-infra-oltp\scripts\oltp-percona.ps1 apply  (5 VMs;  ~10 min)        │
+│      Each script drives its own per-cluster terraform state:                   │
+│        envs/oltp-redis/   ← oltp-redis-node.vmx   (Packer-built per-engine)    │
+│        envs/oltp-mongo/   ← oltp-mongo-node.vmx                                │
+│        envs/oltp-percona/ ← oltp-pxc-node.vmx + oltp-proxysql-node.vmx         │
+│      Per-cluster nftables overlays open only that cluster's ports — no cross-  │
+│      cluster cascade (per memory/feedback_per_cluster_state_per_engine_template.md).
+│                                                                                │
+│      The 3 cluster applies are INDEPENDENT (no inter-cluster dep) — run in     │
+│      any order, or in parallel terminals. Mongo+Percona apps will later        │
+│      consume each other only at the app layer, not at the infra layer.         │
+│                                                                                │
+│      Legacy monolithic path (DEPRECATED — being removed in 0.G.3.5c):          │
+│      nexus-infra-oltp\scripts\oltp.ps1 apply                                  │
+│        Single-state apply across all 14 VMs. Cross-cluster cascade risk        │
+│        (any version-bumped overlay forces unrelated cluster re-applies). Kept  │
+│        until per-cluster envs are live-proven on 0.G.3.5c.                     │
 └────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Cannot reorder**: each cluster's `*_vault_agent` resource uses `filesha256()` on its sidecar JSON at plan time, so the security env MUST have written them first. A premature `oltp apply` fails fast at plan time with `Call to function "filesha256" failed: open ...vault-agent-oltp-{redis,mongo,percona}-<host>.json: The system cannot find the file specified`.
+**Cannot reorder steps 1→2→3**: each cluster's `*_vault_agent` resource uses `filesha256()` on its sidecar JSON at plan time, so the security env MUST have written them first. A premature `oltp-* apply` fails fast at plan time with `Call to function "filesha256" failed: open ...vault-agent-oltp-{redis,mongo,percona}-<host>.json: The system cannot find the file specified`.
+
+**Within step 3**: 3a/3b/3c are independent — terraform states don't reference each other. The only practical ordering is "Redis before apps" (Redis is the fastest + most-used cache; bring it up first so other smoke tests have something to point at).
 
 ### §1.3 Apply (numbered breakdown)
 
@@ -214,6 +240,69 @@ Destroy ordering is the reverse of apply (cluster-create destroy-time noop → r
 - All cluster state (nodes.conf + AOF live inside the VMs)
 - No Vault KV bootstrap-token cleanup needed for 0.G.1 (Redis Cluster has no equivalent to consul/nomad bootstrap tokens; the AppRole secret-ids rotate every security apply anyway)
 
+### §1.7 Per-cluster scripts (Phase 0.G.3.5b)
+
+Three wrappers around the per-cluster terraform states, each mirroring `scripts/oltp.ps1`'s verb shape (`apply | destroy | smoke | cycle | plan | validate`):
+
+| Script | Env | Template(s) | Smoke | VMs | Apply wall-clock |
+|---|---|---|---|---|---|
+| `scripts/oltp-redis.ps1` | `terraform/envs/oltp-redis/` | `oltp-redis-node.vmx` | `smoke-0.G.1.ps1` | 6 | ~5 min |
+| `scripts/oltp-mongo.ps1` | `terraform/envs/oltp-mongo/` | `oltp-mongo-node.vmx` | `smoke-0.G.2.ps1` | 3 | ~5 min |
+| `scripts/oltp-percona.ps1` | `terraform/envs/oltp-percona/` | `oltp-pxc-node.vmx` + `oltp-proxysql-node.vmx` | `smoke-0.G.3.ps1` | 5 | ~10 min |
+
+**Full per-cluster cold-rebuild** (post 0.G.3.5c — after legacy `envs/oltp/` deleted):
+
+```pwsh
+# Pre-flight: foundation + security envs applied per §0
+# Pre-flight: 4 packer templates built (each ~7-8 min)
+cd packer\oltp-redis-node    ; packer init . ; packer build .
+cd ..\oltp-mongo-node        ; packer init . ; packer build .
+cd ..\oltp-pxc-node          ; packer init . ; packer build .
+cd ..\oltp-proxysql-node     ; packer init . ; packer build .
+cd ..\..\
+
+# Apply each cluster (independent — can run in parallel terminals)
+pwsh -File scripts\oltp-redis.ps1   cycle    # destroy → apply → smoke
+pwsh -File scripts\oltp-mongo.ps1   cycle
+pwsh -File scripts\oltp-percona.ps1 cycle
+```
+
+**Per-cluster selective ops** (per `feedback_selective_provisioning.md` — every toggle defaults `true`; `-Vars` is opt-OUT):
+
+```pwsh
+# REDIS — 3-node primary set only, no replicas (debugging)
+pwsh -File scripts\oltp-redis.ps1 apply -Vars enable_redis_4=false,enable_redis_5=false,enable_redis_6=false,enable_redis_cluster_create=false
+
+# REDIS — re-iterate cluster-create step only (assumes 6 nodes already up)
+pwsh -File scripts\oltp-redis.ps1 apply -Vars enable_nftables_backplane=false,enable_redis_vault_agents=false,enable_redis_tls=false,enable_redis_config=false
+
+# MONGO — iterate rs.initiate() one-shot only (assumes 3 nodes + TLS rendered)
+pwsh -File scripts\oltp-mongo.ps1 apply -Vars enable_nftables_backplane=false,enable_mongo_vault_agents=false,enable_mongo_tls=false,enable_mongo_config=false
+
+# MONGO — skip rs-initiate (manual mongosh debug)
+pwsh -File scripts\oltp-mongo.ps1 apply -Vars enable_mongo_rs_initiate=false
+
+# PERCONA — PXC nodes only, skip ProxySQL + VIP (Galera debugging in isolation)
+pwsh -File scripts\oltp-percona.ps1 apply -Vars enable_proxysql_1=false,enable_proxysql_2=false,enable_proxysql_config=false,enable_keepalived_vip=false
+
+# PERCONA — re-iterate galera-cluster-bootstrap one-shot only
+pwsh -File scripts\oltp-percona.ps1 apply -Vars enable_nftables_backplane=false,enable_percona_vault_agents=false,enable_percona_tls=false,enable_percona_config=false,enable_proxysql_config=false,enable_keepalived_vip=false
+
+# PERCONA — skip galera bootstrap (manual mysqld + mysql -e debug)
+pwsh -File scripts\oltp-percona.ps1 apply -Vars enable_galera_cluster_bootstrap=false
+
+# PERCONA — PXC + ProxySQL up but no VIP (apps hit proxysql-1 directly on .54)
+pwsh -File scripts\oltp-percona.ps1 apply -Vars enable_keepalived_vip=false
+```
+
+**Per-cluster destroy** is bounded to that cluster only — never touches the other 2:
+
+```pwsh
+pwsh -File scripts\oltp-percona.ps1 destroy   # tears down 5 percona VMs; redis + mongo untouched
+```
+
+This is the key win over the legacy monolithic `oltp.ps1 destroy` which would tear down all 14 VMs in one shot. **Per-cluster bound destroy = per-cluster bound iteration = ~5-10 min iteration loop vs ~30 min monolithic.**
+
 ## §2 Phase status
 
 | Sub-phase | Cluster | TF | Packer | Smoke | Status | Closed |
@@ -221,7 +310,10 @@ Destroy ordering is the reverse of apply (cluster-create destroy-time noop → r
 | 0.G.1 | Redis Cluster (6 nodes) | `terraform/envs/oltp/` ✅ | `packer/oltp-node/` ✅ | `smoke-0.G.1.ps1` ✅ | ✅ PROVEN cold-rebuildable (2026-05-17) | 2026-05-17 |
 | 0.G.2 | MongoDB RS (3 nodes) | `terraform/envs/oltp/` (mongo overlays) ✅ | `packer/oltp-node/` (extended with oltp_mongo role) ✅ | `smoke-0.G.2.ps1` ✅ | ✅ PROVEN warm + cold-rebuild (2026-05-17) | 2026-05-17 |
 | 0.G.3 | Percona PXC + ProxySQL (5 nodes) | `terraform/envs/oltp/` (6 percona overlays) ✅ | `packer/oltp-node/` (extended with oltp_pxc + oltp_proxysql roles + 3 systemd units) ✅ | `scripts/smoke-0.G.3.ps1` ✅ | ⚠️ scaffolding complete + 16 ratification transients documented in §3.x; **live ratification deferred to Phase 0.G.3.5** (the monolithic oltp template + envs/oltp state proved too brittle; refactor splits into per-engine templates + per-cluster states per `memory/feedback_per_cluster_state_per_engine_template.md`) | 2026-05-18 (scaffolding); 0.G.3.5 follow-up |
-| 0.G.4 | Patroni + etcd + HAProxy (7 nodes) | TBD | extends oltp-node | `smoke-0.G.4.ps1` | not started | — |
+| 0.G.3.5a | per-engine Packer template refactor (4 NEW) | — | `packer/oltp-{redis,mongo,pxc,proxysql}-node/` ✅ | inherits per-engine smoke | ✅ template sources committed; bake time ~7-8 min each (smaller than monolithic ~40-55 min); 0.G.3.5c is the live bake + cold-rebuild | 2026-05-18 (sources) |
+| 0.G.3.5b | per-cluster Terraform state refactor (3 NEW) | `terraform/envs/oltp-{redis,mongo,percona}/` ✅ | reuses per-engine templates from 0.G.3.5a | inherits per-cluster smoke (`smoke-0.G.{1,2,3}.ps1`) | ✅ 3 envs scaffolded + `terraform init/validate/fmt -check` clean; 3 operator wrappers (`scripts/oltp-{redis,mongo,percona}.ps1`) ✅; live cycle deferred to 0.G.3.5c | 2026-05-18 (scaffolding) |
+| 0.G.3.5c | live cold-rebuild + Percona transient #16 + delete legacy | reuses 0.G.3.5b states | rebuilds via 0.G.3.5a templates | smoke gates per cluster | pending: packer build ×4 → destroy legacy `envs/oltp/` → apply 3 per-cluster envs → smoke ×3 → re-ratify Percona xtrabackup SST → delete legacy `packer/oltp-node/` + `terraform/envs/oltp/` + `scripts/oltp.ps1` | — |
+| 0.G.4 | Patroni + etcd + HAProxy (7 nodes) | TBD | NEW oltp-patroni-node + oltp-etcd-node + oltp-haproxy-node (per-engine pattern from 0.G.3.5a) | `smoke-0.G.4.ps1` | not started | — |
 | 0.G.7 | SQL Server FCI + AG (4 ws2025 nodes) | TBD | NEW ws2025 template | `smoke-0.G.7.ps1` | not started | — |
 
 (0.G.5 ClickHouse + 0.G.6 StarRocks belong to the sibling `nexus-infra-analytics` repo.)

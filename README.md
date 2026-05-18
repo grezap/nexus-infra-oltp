@@ -4,7 +4,7 @@
 [![Terraform](https://img.shields.io/badge/Terraform-1.9+-purple)](https://www.terraform.io/)
 [![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![Blueprint](https://img.shields.io/badge/blueprint-nexus--platform--plan%20v0.1.3-orange)](https://github.com/grezap/nexus-platform-plan)
-[![Phase](https://img.shields.io/badge/phase-0.G.1%20%2B%200.G.2%20proven%20%E2%80%A2%200.G.3%20%E2%86%92%200.G.3.5%20refactor-yellow)](./CHANGELOG.md)
+[![Phase](https://img.shields.io/badge/phase-0.G.1%20%2B%200.G.2%20proven%20%E2%80%A2%200.G.3.5b%20scaffolded-yellow)](./CHANGELOG.md)
 [![Release](https://img.shields.io/badge/release-unreleased-lightgrey)](./CHANGELOG.md)
 
 OLTP data tier of the **NexusPlatform 66-VM lab** — Redis Cluster · MongoDB RS · Percona XtraDB Cluster + ProxySQL · PostgreSQL Patroni + etcd + HAProxy · SQL Server FCI + AG. 25 VMs across tiers `02-sqlserver` (4 Windows) + `05-oltp` (21 Linux).
@@ -24,7 +24,9 @@ Phase 0.G in progress. Each sub-phase pairs a cluster bring-up with a `nexus-cli
 | 0.G.1 | Redis Cluster | 6 (3 primaries + 3 replicas) | v0.6.0 RedisAdapter | ✅ cold-rebuild proven (2026-05-17) |
 | 0.G.2 | MongoDB RS | 3 | v0.6.1 MongoAdapter | ✅ cold-rebuild proven (2026-05-17) |
 | 0.G.3 | Percona PXC + ProxySQL | 5 (3 PXC + 2 ProxySQL) | v0.6.2 PerconaAdapter | ⚠️ scaffolding complete (2026-05-18); ratification **deferred to 0.G.3.5 refactor** -- monolithic design too brittle, 16 ratification transients documented in `docs/handbook.md` §3.x |
-| 0.G.3.5 | **refactor: split oltp into per-engine + per-cluster** | — | — | in progress (per `memory/feedback_per_cluster_state_per_engine_template.md`) |
+| 0.G.3.5a | **refactor: per-engine Packer templates** (oltp-redis-node + oltp-mongo-node + oltp-pxc-node + oltp-proxysql-node) | — | — | ✅ scaffolded 2026-05-18 ([commit 61ebad8](https://github.com/grezap/nexus-infra-oltp/commit/61ebad8); 4 NEW templates + shared oltp_firstboot role); live bake deferred to 0.G.3.5c |
+| 0.G.3.5b | **refactor: per-cluster Terraform states** (envs/oltp-redis + envs/oltp-mongo + envs/oltp-percona) + per-cluster operator scripts | — | — | ✅ scaffolded 2026-05-18 ([commit ad4f563](https://github.com/grezap/nexus-infra-oltp/commit/ad4f563); 3 NEW envs + 3 NEW scripts; `terraform validate` clean); live apply deferred to 0.G.3.5c |
+| 0.G.3.5c | live cold-rebuild via per-cluster envs + re-ratify Percona transient #16 + delete legacy `oltp-node` + `envs/oltp` + `oltp.ps1` | — | — | pending (next live cycle) |
 | 0.G.4 | PostgreSQL Patroni + etcd + HAProxy | 7 (3 PG + 3 etcd + 1 HAProxy) | v0.6.3 PatroniAdapter | TBD |
 | 0.G.7 | SQL Server FCI + AG | 4 (2 FCI + 2 AG replicas, `ws2025-desktop`) | v0.6.6 SqlFciAdapter + SqlAgAdapter | TBD |
 
