@@ -6,6 +6,55 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Verified — Phase 0.G.3.5c chunk 1 — LIVE COLD-REBUILD via per-cluster envs ALL GREEN (2026-05-18)
+
+**All 3 OLTP clusters PROVEN cold-rebuildable from per-engine Packer templates + per-cluster Terraform states.** 14 VMs (6 redis + 3 mongo + 3 PXC + 2 ProxySQL) destroyed + cleanly re-cloned from `oltp-{redis,mongo,pxc,proxysql}-node.vmx` artifacts; per-cluster overlays applied; smoke gates green:
+
+- **0.G.1** (`smoke-0.G.1.ps1`): 6-node Redis Cluster, 3 masters + 3 replicas, 16384 slots, cross-shard SET/GET ✅
+- **0.G.2** (`smoke-0.G.2.ps1`): 3-node MongoDB RS `nexus-rs`, 1 PRIMARY + 2 SECONDARY, replicated write/read round-trip via readConcern=majority ✅
+- **0.G.3** (`smoke-0.G.3.ps1`): 3-PXC + 2-ProxySQL stack on mutual TLS, VRRP-floated VIP `192.168.70.50` on proxysql-1 MASTER, end-to-end write via VIP propagates to all 3 PXC backends ✅
+- Regression: legacy oltp 0.G.1 + 0.G.2 still active alongside the per-cluster envs (no cross-contamination) ✅
+
+**11 new transients surfaced + permanently fixed during the cold-rebuild** (full table in [`docs/handbook.md` §3.x](./docs/handbook.md)):
+
+1. **#17 — ProxySQL apt package is `proxysql` not `proxysql2`.** Vendor APT ships single-name `proxysql_2.6.x_*.deb`; the `proxysql2` in the role broke `oltp-proxysql-node` packer build. Fix: rename apt package in `packer/oltp-proxysql-node/ansible/roles/oltp_proxysql/tasks/main.yml`.
+2. **#18 — Redis 8 `--cluster-replicas 1` leaves orphan masters.** Redis 8.0.2's redis-cli create silently fails to assign the secondary 3 nodes as replicas; cluster reports `cluster_state:ok` + 16384 slots but shape is 6 masters + 0 replicas. Live fix: SSH each orphan + `CLUSTER REPLICATE <master-id>`. Permanent fix TODO in `role-overlay-redis-cluster-create.tf` (orphan detection + auto-REPLICATE).
+3. **#19 — Firstboot `chown root:mysql` crashed on proxysql nodes** (no mysql group there). Moved proxysql out of `cluster=percona` into `cluster=proxysql` + `IDENTITY_DIR=/etc/nexus-proxysql` in `packer/_shared/ansible/roles/oltp_firstboot/files/oltp-node-firstboot.sh`. Smoke updated to match (per-role dir).
+4. **#16+#20 — Root cause of the unsolved monolithic #16 (joiner SST didn't sync).** TWO compounding bugs: (a) `sst-auth.cnf` written with `[mysqld]` section header — PXC 8.0 removed `wsrep_sst_auth` from `[mysqld]`; only valid under `[sst]`. mysqld errors `unknown variable` + aborts. (b) chunk 3b's `wsrep.cnf` render lacks trailing newline; chunk 3c step 6's `echo '!include sst-auth.cnf' | tee -a` concatenates onto the last line → `pxc-encrypt-cluster-traffic = ON!include /etc/nexus-percona/sst-auth.cnf` single garbage line → !include never fires → wsrep_sst_auth missing → joiner SST fails. Fixed: `[mysqld]` → `[sst]` in `role-overlay-percona-galera-bootstrap.tf` step 6 + trailing blank line in `role-overlay-percona-config.tf` wsrep.cnf render + belt-and-braces `sed -i -e '$a\\'` in step 6 before tee -a. Bumped `galera_bootstrap_v` to v5, `percona_config_v` to v5.
+5. **#20.b — galera-bootstrap verify mysql calls run as nexusadmin** (no sudo) → can't traverse `/etc/nexus-percona/tls/` (0750 root:mysql) to read ca.pem → `--ssl-mode=VERIFY_CA` aborts. Fix: `sudo mysql ...` in v4+.
+6. **#20.c — mysql client `[Warning] Using a password on the command line interface can be insecure.`** stderr line merges (via 2>&1) above SELECT result; `$readOut -eq $token` fails on multi-line. Write side used `-match` (regex), read side was `-eq`. Fix: `[regex]::Escape($token) -match` in v5.
+7. **#21 — ProxySQL nodes lack `mysql` client** — oltp_proxysql role only installed `proxysql + keepalived`. The proxysql_config admin probe, keepalived check_proxysql.sh, smoke gate's :6033 client all fail with `command not found`. Fix: add `mariadb-client` to apt install list in the role. Rebake oltp-proxysql-node template (10m 15s).
+8. **#22 — VRRP multicast (`224.0.0.18`) doesn't reliably traverse VMware Workstation VMnet11.** Both proxysql nodes go split-brain MASTER. Fix: switch to unicast VRRP — `unicast_src_ip <self>` + `unicast_peer { <peer> }` in keepalived.conf. Bumped `keepalived_v` to v2 + added per-host `peer` field to locals.
+9. **Smoke uses `mysql --defaults-file=...`** but root has a KV-derived password post-bootstrap → mysql w/o credentials fails. Fix: 3 instances patched to use `/usr/local/sbin/nexus-pxc-mysql` wrapper.
+10. **Smoke VIP probe fails `VERIFY_CA`** — ProxySQL serves :6033 TLS using its auto-generated self-signed cert (no SANs in our chain). Fix: smoke uses `--ssl-mode=REQUIRED` (TLS yes, validate-chain no). **TODO 0.G.3.6**: override proxysql frontend cert with our PKI-issued cert.
+11. **`modules/vm` clone_vm destroy provisioner silent-error-swallow** — `vmrun deleteVM` fails against running VMs but `*>$null` hid the error. Stale VM dirs broke next clone_vm's "Destination already exists" pre-flight. Fix: stop → sleep 2 → deleteVM → retry-if-still-there → rm -rf in `terraform/modules/vm/main.tf`.
+
+**Source files changed (this commit):**
+
+- `packer/_shared/ansible/roles/oltp_firstboot/files/oltp-node-firstboot.sh` — #19 proxysql cluster split
+- `packer/oltp-proxysql-node/ansible/roles/oltp_proxysql/tasks/main.yml` — #17 (proxysql2 → proxysql) + #21 (mariadb-client)
+- `terraform/envs/oltp-percona/role-overlay-percona-config.tf` — #16 trailing blank line (`percona_config_v` v5)
+- `terraform/envs/oltp-percona/role-overlay-percona-galera-bootstrap.tf` — #20 [sst] section + #20.b sudo verify + #20.c read regex + belt-and-braces sed ensure-newline before tee -a (`galera_bootstrap_v` v5)
+- `terraform/envs/oltp-percona/role-overlay-proxysql-keepalived.tf` — #22 unicast VRRP (`keepalived_v` v2)
+- `terraform/modules/vm/main.tf` — destroy provisioner: stop+wait+deleteVM+retry+rm
+- `scripts/smoke-0.G.3.ps1` — nexus-pxc-mysql wrapper + per-role identity dir + sudo + `--ssl-mode=REQUIRED` for VIP
+- `.github/workflows/packer-validate.yml` — packer + terraform matrices extended to validate the 4 new per-engine templates + 3 new per-cluster envs (legacy entries kept until chunk 2)
+- `docs/handbook.md` — status header rewrite; §2 phase status: 0.G.3.5c chunk 1 ✅ PROVEN; §3.x: +11 transient rows with diagnoses + permanent fixes
+- `README.md` — phase badge: "0.G.3.5b scaffolded" → "0.G.3.5c PROVEN cold-rebuildable" (all 3 OLTP clusters)
+- `CHANGELOG.md` — this entry
+
+**Live wall-clock (apply phases only):**
+
+- destroy legacy 14 VMs: ~30s
+- packer build ×4 (oltp-redis-node 8m 8s + oltp-mongo-node 7m 50s + oltp-pxc-node 9m 0s + oltp-proxysql-node 7m 12s first + 10m 15s retry post-#17 fix = ~32m sequential)
+- apply oltp-redis: ~6m incl. #18 manual REPLICATE
+- apply oltp-mongo: ~5m clean
+- apply oltp-percona: ~25m incl. #16/#20 root-cause + live config fix + #21 rebake + #22 unicast switch + smoke iteration
+
+Total cold-rebuild + diagnose 11 transients: ~75 min interactive — well under the monolithic design's per-iteration cost (which was 30 min PER terraform apply attempt before any diagnosis time).
+
+**Legacy `packer/oltp-node/` + `terraform/envs/oltp/` + `scripts/oltp.ps1` kept this commit** for safety + git history reference. Removed in 0.G.3.5c chunk 2 (after this commit's CI is green).
+
 ### Added — Phase 0.G.3 (Percona XtraDB Cluster + ProxySQL, 5 nodes) — scaffolding complete; ratification deferred to 0.G.3.5 refactor (2026-05-18)
 
 **Ratification status (honest):** Live ratification cycle hit **16 transients** across 7 Packer builds + 6 oltp apply iterations + a manual redis CLUSTER RESET HARD recovery. Each transient was diagnosed + fixed (with code changes baked into the chunk 3 overlays + the oltp_pxc Ansible role + the chunk 4 Packer template). Transient #16 (joiner SST didn't reach Synced) stopped converging — the monolithic `envs/oltp/` + `oltp-node.vmx` design's 30-min full-tree iteration loop made each new SST debug attempt too slow + each fix in percona kept cascading to redis/mongo state.

@@ -123,9 +123,15 @@ foreach ($ip in $allIps) {
         $out = Invoke-RemoteCommand -Ip $ip -Command 'hostname'
         $out -match "^$($e.host)$"
     } | Out-Null
-    Test-Check -Description "$ip : node-identity.env under /etc/nexus-percona/ (cluster=percona, role=$($e.role))" -Probe {
-        $out = Invoke-RemoteCommand -Ip $ip -Command 'sudo cat /etc/nexus-percona/node-identity.env 2>&1'
-        ($out -match "NEXUS_ROLE=$($e.role)") -and ($out -match 'NEXUS_CLUSTER=percona') -and ($out -match "NEXUS_HOSTNAME=$($e.host)")
+    # Per-role identity dir: PXC nodes get /etc/nexus-percona/ (cluster=percona, mysql group);
+    # ProxySQL nodes get /etc/nexus-proxysql/ (cluster=proxysql, proxysql group) per the
+    # 0.G.3.5c chunk 1 firstboot fix (transient #19 -- mysql group doesn't exist on proxysql
+    # nodes so chown to root:mysql crashed firstboot; moved proxysql to its own CLUSTER + DIR).
+    $idDir     = if ($e.role -eq 'proxysql') { '/etc/nexus-proxysql' } else { '/etc/nexus-percona' }
+    $idCluster = if ($e.role -eq 'proxysql') { 'proxysql' }            else { 'percona' }
+    Test-Check -Description "$ip : node-identity.env under $idDir/ (cluster=$idCluster, role=$($e.role))" -Probe {
+        $out = Invoke-RemoteCommand -Ip $ip -Command "sudo cat $idDir/node-identity.env 2>&1"
+        ($out -match "NEXUS_ROLE=$($e.role)") -and ($out -match "NEXUS_CLUSTER=$idCluster") -and ($out -match "NEXUS_HOSTNAME=$($e.host)")
     } | Out-Null
 }
 
@@ -296,15 +302,15 @@ if ($failures.Count -gt 0) {
 Write-Section 'Galera cluster: size=3, all Synced, all Primary'
 foreach ($ip in $pxcIps) {
     Test-Check -Description "$ip : wsrep_cluster_size == 3" -Probe {
-        $out = Invoke-RemoteCommand -Ip $ip -Command 'sudo mysql --defaults-file=/etc/nexus-percona/my.cnf -BNe "SHOW STATUS LIKE ''wsrep_cluster_size''" 2>/dev/null'
+        $out = Invoke-RemoteCommand -Ip $ip -Command 'sudo /usr/local/sbin/nexus-pxc-mysql -BNe "SHOW STATUS LIKE ''wsrep_cluster_size''" 2>/dev/null'
         $out -match 'wsrep_cluster_size\s+3\s*$'
     } | Out-Null
     Test-Check -Description "$ip : wsrep_local_state_comment == Synced" -Probe {
-        $out = Invoke-RemoteCommand -Ip $ip -Command 'sudo mysql --defaults-file=/etc/nexus-percona/my.cnf -BNe "SHOW STATUS LIKE ''wsrep_local_state_comment''" 2>/dev/null'
+        $out = Invoke-RemoteCommand -Ip $ip -Command 'sudo /usr/local/sbin/nexus-pxc-mysql -BNe "SHOW STATUS LIKE ''wsrep_local_state_comment''" 2>/dev/null'
         $out -match 'wsrep_local_state_comment\s+Synced'
     } | Out-Null
     Test-Check -Description "$ip : wsrep_cluster_status == Primary (not Non-Primary; no split-brain)" -Probe {
-        $out = Invoke-RemoteCommand -Ip $ip -Command 'sudo mysql --defaults-file=/etc/nexus-percona/my.cnf -BNe "SHOW STATUS LIKE ''wsrep_cluster_status''" 2>/dev/null'
+        $out = Invoke-RemoteCommand -Ip $ip -Command 'sudo /usr/local/sbin/nexus-pxc-mysql -BNe "SHOW STATUS LIKE ''wsrep_cluster_status''" 2>/dev/null'
         $out -match 'wsrep_cluster_status\s+Primary'
     } | Out-Null
 }
@@ -335,10 +341,18 @@ Test-Check -Description "VIP $vip:6033 reachable from build host (mysql via VIP 
     # one of the 3 PXC nodes. Don't have mysql client on build host
     # necessarily; SSH through pxc-node-1 to test the VIP path.
     $token = "smoke-0G3-$(Get-Random)-$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
-    $tlsArgs = "--ssl-ca=/etc/nexus-percona/tls/ca.pem --ssl-mode=VERIFY_CA"
+    # ProxySQL serves TLS on :6033 using its auto-generated self-signed
+    # cert (CN=ProxySQL_Auto_Generated_Server_Certificate, no SANs) when
+    # `mysql-have_ssl=true` but `ssl_p2c_*` cert paths aren't overridden.
+    # We don't wire client-side cert overrides yet (TODO: 0.G.3.6 -- map
+    # /etc/nexus-percona/tls/server-cert.pem into ProxySQL frontend), so
+    # --ssl-mode=REQUIRED here (TLS yes, validate-chain no). Backend p2s
+    # path IS proper mTLS via our PKI -- this is only the frontend gap.
+    $tlsArgs = "--ssl-mode=REQUIRED"
     # CREATE + INSERT via VIP. ON DUPLICATE KEY UPDATE for idempotency.
     $writeSql = "CREATE TABLE IF NOT EXISTS nexus_smoke.smoke_test (smoke_key VARCHAR(64) PRIMARY KEY, token VARCHAR(128) NOT NULL); INSERT INTO nexus_smoke.smoke_test (smoke_key, token) VALUES ('smoke-key', '$token') ON DUPLICATE KEY UPDATE token = '$token'; SELECT 'WROTE' AS status;"
-    $writeOut = Invoke-RemoteCommand -Ip $bootstrapIp -Command "mysql -h $vip -P 6033 -u smoke-rw -p$smokeRwPwd $tlsArgs nexus_smoke -e `"$writeSql`" 2>&1"
+    # sudo not strictly required for --ssl-mode=REQUIRED but kept for parity with backend path.
+    $writeOut = Invoke-RemoteCommand -Ip $bootstrapIp -Command "sudo mysql -h $vip -P 6033 -u smoke-rw -p$smokeRwPwd $tlsArgs nexus_smoke -e `"$writeSql`" 2>&1"
     if ($writeOut -notmatch 'WROTE') { return $false }
     # Stash for next checks (script-level scope).
     $script:smokeToken      = $token
@@ -355,8 +369,10 @@ foreach ($ip in $pxcIps) {
         $tlsArgs = "--ssl-ca=/etc/nexus-percona/tls/ca.pem --ssl-mode=VERIFY_CA"
         $readSql = "SELECT token FROM nexus_smoke.smoke_test WHERE smoke_key='smoke-key'"
         for ($i = 1; $i -le 5; $i++) {
-            $readOut = Invoke-RemoteCommand -Ip $ip -Command "mysql -h 127.0.0.1 -u smoke-rw -p$script:smokeRwPwd $tlsArgs nexus_smoke -BNe `"$readSql`" 2>&1"
-            if ($readOut -eq $script:smokeToken) { return $true }
+            # sudo required for /etc/nexus-percona/tls/ca.pem read; mysql warns about
+            # password-on-cli to stderr (merged via 2>&1) so use -match not -eq.
+            $readOut = Invoke-RemoteCommand -Ip $ip -Command "sudo mysql -h 127.0.0.1 -u smoke-rw -p$script:smokeRwPwd $tlsArgs nexus_smoke -BNe `"$readSql`" 2>&1"
+            if ($readOut -match [regex]::Escape($script:smokeToken)) { return $true }
             Start-Sleep -Seconds 1
         }
         return $false

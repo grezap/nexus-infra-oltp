@@ -38,7 +38,11 @@ jobs:
       max-parallel: 1
       matrix:
         template:
-          - oltp-node    # Phase 0.G.1 (Redis) + 0.G.2 (MongoDB) + later 0.G.* (Percona/Patroni)
+          - oltp-node            # LEGACY (monolithic; being removed in 0.G.3.5c chunk 2)
+          - oltp-redis-node      # Phase 0.G.3.5a per-engine (Redis Cluster)
+          - oltp-mongo-node      # Phase 0.G.3.5a per-engine (MongoDB Replica Set)
+          - oltp-pxc-node        # Phase 0.G.3.5a per-engine (Percona XtraDB Cluster server)
+          - oltp-proxysql-node   # Phase 0.G.3.5a per-engine (ProxySQL + keepalived)
     steps:
       - uses: actions/checkout@v4
 
@@ -75,7 +79,10 @@ jobs:
       fail-fast: false
       matrix:
         env:
-          - envs/oltp    # Phase 0.G (Redis + MongoDB + later clusters)
+          - envs/oltp          # LEGACY (monolithic; being removed in 0.G.3.5c chunk 2)
+          - envs/oltp-redis    # Phase 0.G.3.5b per-cluster (6 redis VMs)
+          - envs/oltp-mongo    # Phase 0.G.3.5b per-cluster (3 mongo VMs)
+          - envs/oltp-percona  # Phase 0.G.3.5b per-cluster (5 percona VMs)
     steps:
       - uses: actions/checkout@v4
       - uses: hashicorp/setup-terraform@v3
@@ -97,7 +104,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install ansible-lint ansible
-      - run: ansible-lint packer/oltp-node/ansible/ packer/_shared/ansible/
+      - run: ansible-lint packer/oltp-node/ansible/ packer/oltp-redis-node/ansible/ packer/oltp-mongo-node/ansible/ packer/oltp-pxc-node/ansible/ packer/oltp-proxysql-node/ansible/ packer/_shared/ansible/
 
   shell-lint:
     name: ShellCheck + PSScriptAnalyzer

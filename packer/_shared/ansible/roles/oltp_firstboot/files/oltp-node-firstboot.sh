@@ -142,8 +142,14 @@ case "$VMNET11_IP" in
   192.168.70.51) HOSTNAME=pxc-node-1; VMNET10_IP=192.168.10.51; ROLE=pxc; CLUSTER=percona ;;
   192.168.70.52) HOSTNAME=pxc-node-2; VMNET10_IP=192.168.10.52; ROLE=pxc; CLUSTER=percona ;;
   192.168.70.53) HOSTNAME=pxc-node-3; VMNET10_IP=192.168.10.53; ROLE=pxc; CLUSTER=percona ;;
-  192.168.70.54) HOSTNAME=proxysql-1; VMNET10_IP=192.168.10.54; ROLE=proxysql; CLUSTER=percona ;;
-  192.168.70.55) HOSTNAME=proxysql-2; VMNET10_IP=192.168.10.55; ROLE=proxysql; CLUSTER=percona ;;
+  # ProxySQL nodes are in the same envs/oltp-percona/ TF state as PXC but
+  # are their own engine cluster -- CLUSTER=proxysql (not percona) so the
+  # IDENTITY_DIR mapping below routes to /etc/nexus-proxysql with the
+  # proxysql group (proxysql nodes don't have the mysql group, only
+  # apt-shipped proxysql group). Fixed in 0.G.3.5c chunk 1 ratification
+  # 2026-05-18 (transient #19 in handbook s3.x).
+  192.168.70.54) HOSTNAME=proxysql-1; VMNET10_IP=192.168.10.54; ROLE=proxysql; CLUSTER=proxysql ;;
+  192.168.70.55) HOSTNAME=proxysql-2; VMNET10_IP=192.168.10.55; ROLE=proxysql; CLUSTER=proxysql ;;
 
   # ─── 0.G.4 -- Patroni + etcd + HAProxy (7 nodes) -- TODO ──────────────
   # 192.168.70.61..67) patroni-{1..3}, etcd-{1..3}, haproxy-1
@@ -160,11 +166,15 @@ echo "$LOG_PREFIX mapped: hostname=$HOSTNAME role=$ROLE cluster=$CLUSTER VMnet10
 # for the cluster owns the dir + the service runs as the cluster-named
 # user; firstboot just writes the env file into the dir).
 case "$CLUSTER" in
-  redis)   IDENTITY_DIR=/etc/nexus-redis;   IDENTITY_GROUP=redis ;;
-  mongo)   IDENTITY_DIR=/etc/nexus-mongo;   IDENTITY_GROUP=mongodb ;;
-  percona) IDENTITY_DIR=/etc/nexus-percona; IDENTITY_GROUP=mysql ;;
-  # NOTE: percona cluster covers both pxc-node-N and proxysql-N hosts.
-  # PXC nodes own the dir as mysql; ProxySQL nodes only READ from it for
+  redis)    IDENTITY_DIR=/etc/nexus-redis;    IDENTITY_GROUP=redis ;;
+  mongo)    IDENTITY_DIR=/etc/nexus-mongo;    IDENTITY_GROUP=mongodb ;;
+  percona)  IDENTITY_DIR=/etc/nexus-percona;  IDENTITY_GROUP=mysql ;;
+  proxysql) IDENTITY_DIR=/etc/nexus-proxysql; IDENTITY_GROUP=proxysql ;;
+  # NOTE: percona cluster covers pxc-node-N hosts only (PXC nodes own
+  # /etc/nexus-percona as group mysql). ProxySQL nodes get their own
+  # /etc/nexus-proxysql owned by group proxysql (apt-shipped) -- they
+  # were previously lumped into cluster=percona which broke chown at
+  # firstboot because the mysql group only exists on PXC nodes.
   # the shared TLS material. Group=mysql is fine for both since the dir
   # is mode 0750 root:mysql + ProxySQL nodes additionally get
   # /etc/nexus-percona/proxysql-admin-password (mode 0400 root:proxysql)

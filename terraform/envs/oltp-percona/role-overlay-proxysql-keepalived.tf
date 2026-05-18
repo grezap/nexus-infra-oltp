@@ -65,9 +65,15 @@
  */
 
 locals {
+  # Per-host: own IP + the PEER's IP for VRRP unicast.
+  # Multicast VRRP (224.0.0.18 + proto 112) doesn't reliably traverse
+  # VMware Workstation VMnet11 -- both nodes go split-brain MASTER because
+  # neither sees the other's advertisements. Unicast bypasses multicast
+  # entirely. Fixed at 0.G.3.5c chunk 1 ratification 2026-05-18 (transient
+  # #22 in handbook s3.x).
   keepalived_per_host = {
-    "proxysql-1" = { vmnet11 = "192.168.70.54", priority = "110", role = "MASTER" }
-    "proxysql-2" = { vmnet11 = "192.168.70.55", priority = "100", role = "BACKUP" }
+    "proxysql-1" = { vmnet11 = "192.168.70.54", peer = "192.168.70.55", priority = "110", role = "MASTER" }
+    "proxysql-2" = { vmnet11 = "192.168.70.55", peer = "192.168.70.54", priority = "100", role = "BACKUP" }
   }
 
   keepalived_active = {
@@ -87,7 +93,8 @@ resource "null_resource" "proxysql_keepalived" {
     vmnet11      = each.value.vmnet11
     priority     = each.value.priority
     vip          = var.proxysql_vip
-    keepalived_v = "1" # v1 (0.G.3) = initial 2-instance VRRP for VIP .50 with priority 110/100 + check script + AH auth derived from cluster-password.
+    peer_ip      = each.value.peer
+    keepalived_v = "2" # v2 (0.G.3.5c chunk 1 ratification 2026-05-18) = unicast VRRP via unicast_src_ip + unicast_peer (multicast 224.0.0.18 doesn't reliably traverse VMware Workstation VMnet11, both nodes go split-brain MASTER; transient #22 in handbook s3.x). v1 = initial 2-instance multicast VRRP for VIP .50 with priority 110/100 + check script + AH auth derived from cluster-password.
 
     destroy_vm_ip    = each.value.vmnet11
     destroy_ssh_user = var.oltp_node_user
@@ -101,6 +108,7 @@ resource "null_resource" "proxysql_keepalived" {
     command     = <<-PWSH
       $hostName  = '${each.key}'
       $ip        = '${each.value.vmnet11}'
+      $peerIp    = '${each.value.peer}'
       $priority  = '${each.value.priority}'
       $role      = '${each.value.role}'
       $vip       = '${var.proxysql_vip}'
@@ -175,6 +183,16 @@ vrrp_instance VI_PROXYSQL_NEXUS {
   priority      $priority
   advert_int    1
   preempt_delay 5
+
+  # Unicast VRRP -- VMware Workstation VMnet11 doesn't reliably forward
+  # the 224.0.0.18 multicast group between guests, so multicast advertise-
+  # ments are lost both ways and both nodes claim MASTER (split-brain).
+  # Unicast sends advertisements directly to the peer's VMnet11 IP. Fixed
+  # at 0.G.3.5c chunk 1 ratification 2026-05-18 (transient #22).
+  unicast_src_ip $ip
+  unicast_peer {
+    $peerIp
+  }
 
   authentication {
     auth_type AH

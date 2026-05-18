@@ -62,11 +62,29 @@
   ansible.builtin.apt:
     update_cache: true
 
-- name: Install proxysql2 + keepalived (VRRP VIP failover)
+- name: Install proxysql + keepalived (VRRP VIP failover) + mariadb-client
+  # Vendor APT package is `proxysql` (single name, no "2" suffix). The
+  # version is 2.6.x per the channel URL, but the package name itself is
+  # just `proxysql` -- verified via curl on the repo's Packages file:
+  #   https://repo.proxysql.com/ProxySQL/proxysql-2.6.x/bookworm/Packages
+  # Caught at 0.G.3.5c chunk 1 build 4/4 ratification 2026-05-18 (transient
+  # #17 in handbook s3.x).
+  #
+  # mariadb-client provides the `mysql` binary. Required for:
+  #   - role-overlay-proxysql-config.tf admin probe (counts main.mysql_servers
+  #     on admin :6032 to verify the .cnf was loaded into runtime)
+  #   - same overlay's :6033 frontend smoke (SELECT @@hostname via smoke-rw)
+  #   - role-overlay-proxysql-keepalived.tf check_proxysql.sh health probe
+  #   - scripts/smoke-0.G.3.ps1 ProxySQL section
+  # mariadb-client is chosen over mysql-client to avoid pulling Percona's
+  # apt repo into the proxysql template (it doesn't need PXC server libs).
+  # Caught at 0.G.3.5c chunk 1 first-apply ratification 2026-05-18
+  # (transient #21 in handbook s3.x).
   ansible.builtin.apt:
     name:
-      - proxysql2
+      - proxysql
       - keepalived
+      - mariadb-client
     state: present
     update_cache: false
   environment:

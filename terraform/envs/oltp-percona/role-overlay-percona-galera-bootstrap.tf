@@ -102,7 +102,7 @@ resource "null_resource" "percona_galera_bootstrap" {
     ])
     pxc_members        = jsonencode(local.percona_pxc_members)
     bootstrap_ip       = local.percona_bootstrap_ip
-    galera_bootstrap_v = "3" # v3 (0.G.3 ratification fix 2026-05-18, 2nd structural fix) = corrected bootstrap-vs-join ordering. v2 had nexus-percona-bootstrap.service stopped + regular nexus-percona.service started on pxc-node-1 BEFORE joiners came up; Galera in regular mode couldn't form primary view (no peers responding), entered systemd restart loop. v3 keeps bootstrap.service running on node-1 until joiners join, then rolling-restarts node-1 from bootstrap.service to regular service (now it has peers + can join). v2 was the mysql auth wrapper fix. v1 = initial.
+    galera_bootstrap_v = "5" # v5 (0.G.3.5c chunk 1 ratification 2026-05-18) = read-side comparison now uses [regex]::Escape($token) -match (not -eq), to tolerate the mysql client's `[Warning] Using a password on the command line ...` stderr line that 2>&1 merges into $readOut above the SELECT result. The write side was already -match; only read was -eq. v4 added sudo on verify mysql calls (smoke-rw write + 2 reads). v3 = bootstrap-vs-join ordering. v2 = mysql auth wrapper. v1 = initial.
   }
 
   depends_on = [null_resource.percona_config]
@@ -238,7 +238,13 @@ SELECT 'USERS_OK' AS status;
         # ─── Step 6: write sst-auth.cnf + !include on all 3 nodes ──────
         # Each node needs wsrep_sst_auth in its own config so SST joiners
         # can dial back to the donor. Idempotent-append the !include line.
-        $sstAuthBody = "[mysqld]`nwsrep_sst_auth=wsrep_sst:$clusterPwd`n"
+        # Section MUST be [sst] (not [mysqld]). PXC 8.0 removed
+        # `wsrep_sst_auth` from the [mysqld] section -- it's only
+        # valid under [sst] now. With it in [mysqld], mysqld errors
+        # `unknown variable wsrep_sst_auth=...` + aborts before init.
+        # Caught at 0.G.3.5c chunk 1 ratification 2026-05-18 (transient
+        # #20 in handbook s3.x).
+        $sstAuthBody = "[sst]`nwsrep_sst_auth=wsrep_sst:$clusterPwd`n"
         $sstAuthB64 = [Convert]::ToBase64String([System.Text.UTF8Encoding]::new($false).GetBytes($sstAuthBody))
 
         $sstStage = @"
@@ -248,6 +254,15 @@ sudo chown root:mysql /etc/nexus-percona/sst-auth.cnf
 sudo chmod 0640 /etc/nexus-percona/sst-auth.cnf
 # Idempotent: append `!include` only if missing.
 if ! sudo grep -qE '^!include\s+/etc/nexus-percona/sst-auth\.cnf' /etc/nexus-percona/wsrep.cnf; then
+  # Defensive: ensure wsrep.cnf ends with a newline before appending. If
+  # the file's last line lacks a trailing LF (PowerShell here-strings
+  # strip it), `echo X | tee -a` concatenates X onto the last line
+  # producing `pxc-encrypt-cluster-traffic = ON!include /etc/nexus-percona/
+  # sst-auth.cnf` -- a single garbage line that mysqld mis-parses + the
+  # !include never fires. sed -e '\$a\\' is a no-op idempotent ensure-
+  # newline operation. Belt-and-braces with the chunk 3b render's
+  # trailing blank line. Transient #16 in handbook s3.x.
+  sudo sed -i -e '\$a\\' /etc/nexus-percona/wsrep.cnf
   echo '!include /etc/nexus-percona/sst-auth.cnf' | sudo tee -a /etc/nexus-percona/wsrep.cnf > /dev/null
 fi
 echo SST_AUTH_OK
@@ -368,7 +383,13 @@ echo SST_AUTH_OK
       # 3a. WRITE on pxc-node-1 (via smoke-rw -- proves mTLS + auth flow).
       # Use INSERT ... ON DUPLICATE KEY UPDATE for idempotency.
       $writeSql = "CREATE TABLE IF NOT EXISTS nexus_smoke.galera_init_test (smoke_key VARCHAR(64) PRIMARY KEY, token VARCHAR(128) NOT NULL); INSERT INTO nexus_smoke.galera_init_test (smoke_key, token) VALUES ('galera-init-key', '$token') ON DUPLICATE KEY UPDATE token = '$token'; SELECT 'WROTE' AS status;"
-      $writeOut = (ssh @sshOpts "$sshUser@$bootIp" "mysql -h 127.0.0.1 -u smoke-rw -p$smokeRwPwd $tlsArgs nexus_smoke -e `"$writeSql`" 2>&1" | Out-String)
+      # sudo required: /etc/nexus-percona/tls is 0750 root:mysql (nexusadmin
+      # can't traverse to reach ca.pem). sudo escalates to root for the SSL
+      # cert read; mysql itself opens a TCP connection to 127.0.0.1:3306 (not
+      # a socket), so sudo doesn't change connection semantics -- only file
+      # access. Caught at 0.G.3.5c chunk 1 ratification 2026-05-18 (transient
+      # row "Galera verify 3/4 fails despite cluster healthy" in handbook).
+      $writeOut = (ssh @sshOpts "$sshUser@$bootIp" "sudo mysql -h 127.0.0.1 -u smoke-rw -p$smokeRwPwd $tlsArgs nexus_smoke -e `"$writeSql`" 2>&1" | Out-String)
       if ($writeOut -notmatch 'WROTE') {
         Write-Host $writeOut.Trim()
         throw "[galera-bootstrap] FAILED: write on $bootIp didn't return WROTE"
@@ -383,8 +404,13 @@ echo SST_AUTH_OK
         # loop covers the rare network blip / clock-sync window.
         $readOk = $false
         for ($i = 1; $i -le 5; $i++) {
-          $readOut = (ssh @sshOpts "$sshUser@$jIp" "mysql -h 127.0.0.1 -u smoke-rw -p$smokeRwPwd $tlsArgs nexus_smoke -BNe `"$readSql`" 2>&1" | Out-String).Trim()
-          if ($readOut -eq $token) { $readOk = $true; break }
+          # sudo required for /etc/nexus-percona/tls/ca.pem read (see write step above).
+          $readOut = (ssh @sshOpts "$sshUser@$jIp" "sudo mysql -h 127.0.0.1 -u smoke-rw -p$smokeRwPwd $tlsArgs nexus_smoke -BNe `"$readSql`" 2>&1" | Out-String).Trim()
+          # mysql client emits `[Warning] Using a password on the command line ...`
+          # to stderr; with 2>&1 it merges into $readOut as a separate line ABOVE
+          # the actual SELECT result. Match anywhere in the multi-line output for
+          # the literal token (escape regex specials in the token first).
+          if ($readOut -match [regex]::Escape($token)) { $readOk = $true; break }
           Start-Sleep -Seconds 1
         }
         if (-not $readOk) {

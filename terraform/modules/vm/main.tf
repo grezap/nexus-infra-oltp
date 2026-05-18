@@ -68,13 +68,27 @@ resource "null_resource" "clone_vm" {
     command     = <<-PWSH
       $dst   = '${self.triggers.target_vmx}'
       $vmrun = '${self.triggers.vmrun}'
+      $vmDir = Split-Path -Parent $dst
       if (Test-Path $dst) {
-        # Both calls can "fail" legitimately (VM already stopped, stale
-        # registration) — vmrun writes errors to stdout with a non-zero exit.
-        # Capture + discard both streams and ignore exit codes.
-        & $vmrun stop     $dst hard *>$null
-        & $vmrun deleteVM $dst      *>$null
-        Remove-Item -Recurse -Force (Split-Path -Parent $dst) -ErrorAction SilentlyContinue
+        # vmrun stop can legitimately fail (VM already powered off) -- ignore.
+        # vmrun deleteVM CANNOT proceed against a running VM. The earlier
+        # version's `*>$null` silenced that error, leaving stale VM dirs
+        # that broke the next clone_vm's "Destination already exists"
+        # pre-flight. Wait briefly between stop + deleteVM for VMware to
+        # release disk locks; retry deleteVM once if vmx is still there;
+        # filesystem rm is the catch-all. Caught at 0.G.3.5c chunk 1
+        # ratification 2026-05-18 (transient destroy-provisioner-silent
+        # in handbook s3.x).
+        & $vmrun stop $dst hard *>$null
+        Start-Sleep -Seconds 2
+        & $vmrun deleteVM $dst *>$null
+        if (Test-Path $dst) {
+          Start-Sleep -Seconds 2
+          & $vmrun deleteVM $dst *>$null
+        }
+        if (Test-Path $vmDir) {
+          Remove-Item -Recurse -Force $vmDir -ErrorAction SilentlyContinue
+        }
       }
       exit 0
     PWSH

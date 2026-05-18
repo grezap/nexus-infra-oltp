@@ -107,7 +107,7 @@ resource "null_resource" "percona_config" {
     vmnet11          = each.value.vmnet11
     server_id        = each.value.server_id
     cluster_address  = local.percona_cluster_address
-    percona_config_v = "4" # v4 (0.G.3 ratification fix 2026-05-18, 3rd iter) = REMOVED the mysqld --validate-config smoke. On PXC (not vanilla MySQL), --validate-config tries to ACTIVATE wsrep + connect to gcomm:// peers (which aren't bootstrapped yet) -> times out + fails -> chunk 3b errors. The chunk 3c galera-bootstrap probe + actual cluster formation are the real verification. v3 = trailing newline on my.cnf. v2 = !include wsrep.cnf added. v1 = initial two-file split (orphaned wsrep.cnf -- bug).
+    percona_config_v = "5" # v5 (0.G.3.5c chunk 1 ratification 2026-05-18) = added trailing blank line on wsrep.cnf render so the chunk 3c galera-bootstrap step 6 `!include sst-auth.cnf` append lands on its own line (was concatenating into `pxc-encrypt-cluster-traffic = ON!include /etc/nexus-percona/sst-auth.cnf` -- single garbage line -- transient #16 in handbook s3.x). v4 = REMOVED the mysqld --validate-config smoke (on PXC, --validate-config tries to ACTIVATE wsrep + connect to gcomm:// peers; times out). v3 = trailing newline on my.cnf. v2 = !include wsrep.cnf added. v1 = initial two-file split (orphaned wsrep.cnf -- bug).
 
     destroy_vm_ip    = each.value.vmnet11
     destroy_ssh_user = var.oltp_node_user
@@ -235,6 +235,16 @@ wsrep_provider_options          = "gcache.size=512M; gcache.recover=yes"
 # pxc-encrypt-cluster-traffic=ON. This makes ALL Galera replication
 # (SST + IST + state transfers + applier traffic) flow encrypted.
 pxc-encrypt-cluster-traffic     = ON
+
+# Trailing blank line REQUIRED. PowerShell here-string `@"..."@` strips
+# the trailing newline; without this blank line, the last directive ends
+# without LF, and chunk 3c galera-bootstrap step 6's `echo '!include ...'
+# | tee -a` appends WITHOUT a newline separator, producing the malformed
+# line `pxc-encrypt-cluster-traffic     = ON!include /etc/nexus-percona/
+# sst-auth.cnf`. mysqld then treats the whole thing as a single garbage
+# value AND the !include never executes -- wsrep_sst_auth is missing,
+# SST fails, joiners can't sync. Caught at 0.G.3.5c chunk 1 ratification
+# 2026-05-18 (transient #16 in handbook s3.x).
 "@
 
       $myCnfB64    = [Convert]::ToBase64String([System.Text.UTF8Encoding]::new($false).GetBytes(($myCnf -replace "`r`n","`n")))
