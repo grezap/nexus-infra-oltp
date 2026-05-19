@@ -83,11 +83,11 @@ function Check([string]$label, [scriptblock]$probe) {
     }
 }
 
-function Invoke-RemoteWin([string]$host, [string]$cmd, [int]$timeout = 30) {
+function Invoke-RemoteWin([string]$hostName, [string]$cmd, [int]$timeout = 30) {
     $bytes = [Text.Encoding]::Unicode.GetBytes($cmd)
     $b64   = [Convert]::ToBase64String($bytes)
     & ssh -o ConnectTimeout=$timeout -o BatchMode=yes -o StrictHostKeyChecking=no `
-        "$SshUser@$host" "powershell -NoProfile -EncodedCommand $b64" 2>&1 | Out-String
+        "$SshUser@$hostName" "powershell -NoProfile -EncodedCommand $b64" 2>&1 | Out-String
 }
 
 function Section([int]$n, [string]$title, [scriptblock]$body) {
@@ -175,9 +175,9 @@ Section 5 'TLS (per-node + listener cert in LocalMachine\My)' {
 
 # ── Section 6: iSCSI session (FCI pair only) ─────────────────────────────
 Section 6 'iSCSI (LUN visible as CSV on FCI pair)' {
-    foreach ($host in @('sql-fci-1','sql-fci-2')) {
-        $ip = $nodes[$host].ip
-        Check "$host iSCSI session to sql-fci.lun1 active" {
+    foreach ($hostName in @('sql-fci-1','sql-fci-2')) {
+        $ip = $nodes[$hostName].ip
+        Check "$hostName iSCSI session to sql-fci.lun1 active" {
             $out = Invoke-RemoteWin $ip "(Get-IscsiSession | Where-Object TargetNodeAddress -match 'sql-fci.lun1').Count"
             if ($out -match '\b1\b') { 'OK' } else { "session count=$($out.Trim())" }
         }
@@ -194,9 +194,9 @@ Section 7 'WSFC cluster (4 nodes Up + quorum NodeMajority)' {
         $out = Invoke-RemoteWin '192.168.70.11' "(Get-Cluster $fciCluster).Name"
         if ($out -match $fciCluster) { 'OK' } else { "result=$($out.Trim())" }
     }
-    foreach ($host in $nodes.Keys) {
-        Check "$host node state=Up" {
-            $out = Invoke-RemoteWin '192.168.70.11' "(Get-ClusterNode -Name $host).State"
+    foreach ($hostName in $nodes.Keys) {
+        Check "$hostName node state=Up" {
+            $out = Invoke-RemoteWin '192.168.70.11' "(Get-ClusterNode -Name $hostName).State"
             if ($out -match 'Up') { 'OK' } else { "state=$($out.Trim())" }
         }
     }
