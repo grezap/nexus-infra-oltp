@@ -6,6 +6,57 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — Phase 0.G.4 — Patroni PostgreSQL HA + etcd DCS + HAProxy HA pair scaffolded (2026-05-19)
+
+Brings the 4th OLTP cluster online (in scaffold) via the per-cluster + per-engine architectural canon born from 0.G.3.5. **8 VMs total**: 3 Patroni nodes (`pg-primary`, `pg-replica-1`, `pg-replica-2` at `.61/.62/.63`) + 3 etcd nodes (`etcd-1/2/3` at `.64/.65/.66`) + **2 HAProxy nodes** (`haproxy-pg-1` + `haproxy-pg-2` at `.67/.68`) + **VRRP-floated VIP `192.168.70.60`** between the haproxy pair, mirroring the 0.G.3 proxysql-1/2 + VIP `.50` pattern (no SPOF on the LB tier — the "HA" promise in the phase name covers the LB tier, not just the PG nodes). Cross-tier sweep done in the same commit window across `nexus-infra-vmware`, `nexus-platform-plan`, `nexus-cli`, `portfolio-index`, `grezap/grezap` per `feedback_handbook_standard.md` invariant 1 + `feedback_public_face_must_stay_current.md`.
+
+Note: the initial scaffold (one commit cycle earlier in the same session) shipped a single HAProxy. Greg correctly flagged that single HAProxy is a SPOF inconsistent with the 0.G.3 proxysql HA pair pattern and inconsistent with the phase name "Patroni Postgres HA". Pivoted to the HA pair before any commits were pushed -- `vms.yaml` cluster `postgres` updated to add `haproxy-pg-2` + `virtual_ips.haproxy_pg_vip: 192.168.70.60`; foundation overlay bumped v4→v5 (+8 reservations vs +7); security AppRole/policy/sidecar count 7→8; PKI allowed_domains rewrote to cover both haproxy hostnames; firstboot IP map added `.68`; oltp_haproxy Packer role now apt-installs keepalived + iproute2; per-cluster TF env added `module.haproxy_pg_2` + new role-overlay-haproxy-keepalived.tf overlay; smoke gate added VIP-bound + cert IP-SAN includes VIP + end-to-end-via-VIP checks; demo-0.G.4-haproxy-vip-cutover.json rewritten to test actual VIP migration.
+
+**3 new per-engine Packer templates** (per `feedback_per_cluster_state_per_engine_template.md`):
+
+- `packer/oltp-patroni-node/`: Debian 13 + PostgreSQL 17 from PGDG bookworm apt + Patroni 4.0.5 from PyPI via pip in a `/opt/patroni-venv` (etcd3 extras for the v3 gRPC API). Both apt-shipped `postgresql.service` + `postgresql@17-main.service` are MASKED at bake (Patroni owns the PG lifecycle). `nexus-patroni.service` delivered DISABLED. `/usr/local/sbin/nexus-patronictl` wrapper pre-points patronictl at our config dir.
+- `packer/oltp-etcd-node/`: etcd 3.5.16 downloaded from upstream GitHub release tarball + statically-linked binaries to `/usr/local/bin/{etcd,etcdctl,etcdutl}`. Apt's etcd is 3.4.x (uses deprecated v2 API); upstream 3.5+ gives the gRPC v3 + `etcdctl`/`etcdutl` split + snapshot-restore tooling. `nexus-etcd.service` DISABLED. `/usr/local/sbin/nexus-etcdctl` wrapper pre-loads endpoints + TLS material.
+- `packer/oltp-haproxy-node/`: HAProxy 3.0 LTS from `haproxy.debian.net` (vbernat's backport repo) + `keepalived` (VRRP daemon for the HA-pair VIP) + `iproute2`. Apt's `haproxy.service` MASKED (would race our `nexus-haproxy.service`); apt's `keepalived.service` DISABLED-not-masked (terraform haproxy-keepalived overlay enables after rendering per-host `/etc/keepalived/keepalived.conf` with priority + unicast peer).
+
+**Per-cluster Terraform env** at `terraform/envs/oltp-patroni/` (7 overlays):
+
+- `main.tf`: 8 `module.vm` blocks (3 patroni + 3 etcd + 2 haproxy HA pair).
+- `variables.tf`: 8 `enable_*` per-VM toggles + 16 MAC vars + 8 per-overlay toggles (`enable_nftables_backplane`, `enable_patroni_vault_agents`, per-host `enable_<host>_vault_agent`, `enable_patroni_tls`, `enable_etcd_bootstrap`, `enable_patroni_bootstrap`, `enable_haproxy_config`, `enable_haproxy_keepalived`). All default `true` per `feedback_terraform_partial_apply_destroys_resources.md`. New `haproxy_vip` var (default `192.168.70.60`).
+- `outputs.tf`: structured map `{patroni, etcd, haproxy, cluster_scope, haproxy_vip}`. `haproxy` is a 2-entry map keyed by `haproxy-pg-1`/`haproxy-pg-2` with a `keepalived_role` field per entry.
+- `role-overlay-patroni-nftables-backplane.tf`: per-cluster nftables ruleset opening `22, 5432, 8008, 2379, 2380, 8404` on VMnet11 + proto 112 (VRRP) + whole-segment VMnet10 trust for streaming replication + raft mesh + Patroni REST cross-calls + VRRP unicast.
+- `role-overlay-patroni-vault-agents.tf`: 8-host `for_each` Vault Agent install + `00-base.hcl`. Reads per-host AppRole JSON sidecars at `$HOME/.nexus/vault-agent-oltp-patroni-<host>.json`.
+- `role-overlay-patroni-tls.tf`: 8-host `for_each` PKI cert render + role-specific KV cred renders. Per-host bundle.pem → split script `/usr/local/sbin/nexus-patroni-tls-split.sh <dest-dir> <owner-group>` produces 3 files. KV count varies per role: patroni=4, etcd=2, haproxy=2. **HAProxy nodes additionally carry the VIP `.60` in their cert IP-SANs** so client handshakes against the floating VIP validate regardless of which haproxy currently holds it.
+- `role-overlay-etcd-bootstrap.tf`: one-shot — render `etcd.conf.yml` + parallel start + leader wait + HTTP basic-auth RBAC + authenticated round-trip.
+- `role-overlay-patroni-bootstrap.tf`: one-shot — render `patroni.yml` with `password_file` refs + parallel start + wait for 1 Leader + 2 Streaming Replica + psql round-trip.
+- `role-overlay-haproxy-config.tf` (`for_each` over both haproxy nodes): render identical `/etc/nexus-haproxy/haproxy.cfg` on BOTH haproxy-pg-{1,2} (frontend `:5432` → `backend pg_pool` via Patroni REST `/leader` httpchk; stats UI `:8404` with basic-auth) + start nexus-haproxy.service + per-node backend health verify.
+- `role-overlay-haproxy-keepalived.tf` **(NEW)**: VRRP-floated VIP `var.haproxy_vip` between haproxy-pg-1 (priority 110 MASTER candidate) + haproxy-pg-2 (priority 100 BACKUP). Unicast mode (`unicast_src_ip` + `unicast_peer`) per the 0.G.3.5c chunk 1 transient #22 lesson. Health script `/etc/keepalived/check_haproxy.sh` runs `systemctl is-active nexus-haproxy.service` + HAProxy admin socket `show info` probe; weight `-30` on failure demotes MASTER below BACKUP. AH auth password derived from `haproxy-stats-password` (truncated to 8 chars).
+
+**HAProxy HA pair eliminates the SPOF** that a single HAProxy would have had — the "HA promise" in the phase name now covers the LB tier, not just the PG nodes. Mirrors the 0.G.3 proxysql-1/2 + VIP `.50` pattern exactly.
+
+**Operator surface:**
+
+- `scripts/oltp-patroni.ps1`: standard verb shape (`apply | destroy | smoke | cycle | plan | validate`) mirroring oltp-redis/mongo/percona wrappers. Examples updated for the HA pair toggles (`enable_haproxy_pg_1`/`enable_haproxy_pg_2`/`enable_haproxy_keepalived`).
+- `scripts/smoke-0.G.4.ps1`: ~90 checks across 13 sections (reachability → firstboot → identity → vault-agent → TLS material + KV creds + VIP-in-IP-SANs for haproxy → etcd service + raft health + RBAC + put/get → Patroni service + 1L+2R shape → streaming replication → psql round-trip on leader → replication-observable on replicas → HAProxy backend health + stats UI auth on BOTH nodes → keepalived active on both + VIP bound on exactly 1 → end-to-end write via VIP `.60:5432`).
+
+**Cross-env preflight** (lands in `nexus-infra-vmware`):
+
+- `foundation/role-overlay-gateway-oltp-reservations.tf`: bumped marker v3 → **v5** (v4 was the abandoned single-HAProxy variant superseded mid-scaffold by the HA pair design), adding 8 dhcp-host reservations for the patroni-tier MACs (`:7E-:85`) pinning `.61-.68`. Atomic single-file replace.
+- `security/role-overlay-vault-pki-patroni.tf`: NEW PKI role `patroni-server` (90 d leaf TTL, 26 allowed_domains covering all 8 hosts in bare + `.nexus.lab` + `.patroni.nexus.lab` forms, server+client EKU).
+- `security/role-overlay-vault-patroni-cluster-creds-seed.tf`: NEW. Sticky-seeds 5 KV creds at `nexus/oltp/patroni/{etcd-root,patroni-rest,postgres-superuser,postgres-replication,haproxy-stats}-password` (32-char hex each, generated server-side via openssl).
+- `security/role-overlay-vault-agent-patroni-policies.tf`: NEW. 8 role-differentiated narrow policies (patroni=4 KV grants, etcd=2, haproxy=2 -- both haproxy nodes share the same policy body).
+- `security/role-overlay-vault-agent-patroni-approles.tf`: NEW. 8 AppRoles + per-host JSON sidecars at `$HOME/.nexus/vault-agent-oltp-patroni-<host>.json`.
+
+**Demos** (System B JSON, lands in `nexus-cli/docs/demos/`):
+
+- `demo-0.G.4-patroni-failover.json`: triggers `nexus-patronictl switchover` and verifies new leader elected + etcd DCS updated + HAProxy backend re-routes (on both haproxy nodes).
+- `demo-0.G.4-patroni-mtls-roundtrip.json`: psql via VIP `192.168.70.60:5432` with `sslmode=verify-full` + `sslrootcert=/etc/ssl/certs/patroni-ca.pem`; verifies PG `pg_stat_ssl` reports the connection as `ssl=t version=TLSv1.x`. The cert's IP-SAN includes the VIP so verify-full passes regardless of which haproxy holds it.
+- `demo-0.G.4-haproxy-vip-cutover.json`: **genuine VRRP VIP migration**. Continuous psql read loop via VIP; stop nexus-haproxy on the MASTER (haproxy-pg-1); keepalived check_haproxy fires within `fall 3` × `interval 2` = ~6 s; BACKUP (haproxy-pg-2) promotes itself + binds the VIP; app reads resume against the same `.60:5432` address with no client reconfig.
+- `demo-0.G.4-etcd-leader-failover.json`: `systemctl stop` the etcd leader; verifies raft re-elects within ~5 s and Patroni's etcd3 client transparently fails over (PG service uninterrupted).
+
+**Handbook:** §0 prereqs extended with 0.G.4 cross-tier dependencies; §1.1 build table now lists 7 templates; §1.2 cross-env order step 3d added for patroni; §1.4 smoke invocation; §1.5 selective ops examples for 6 patroni overlays; §1.7 cluster table now has 4 wrappers; §2 phase status row for 0.G.4; §3.1 cold-rebuild canon extended; §3.3 4 demo playbook narratives (mirroring the JSON demos).
+
+**What changes in the next session (live ratification):** apply the chain `foundation → security → packer build (3 templates) → oltp-patroni apply → smoke-0.G.4.ps1`. Document any transients in §3.x of the handbook with the same symptom→diagnosis→recovery shape used for 0.G.3 / 0.G.3.5c. Once smoke ALL GREEN + cold-rebuild proven, close 0.G.4 + sweep external faces + post-CI verify.
+
 ### Removed — Phase 0.G.3.5c chunk 2 — legacy monolithic paths deleted; per-cluster is canonical (2026-05-18)
 
 Closes the 0.G.3.5 refactor. With the per-cluster envs + per-engine templates LIVE-PROVEN (chunk 1, commit `d076abd`, CI green), the legacy monolithic paths are now dead code. Deleted in this commit:

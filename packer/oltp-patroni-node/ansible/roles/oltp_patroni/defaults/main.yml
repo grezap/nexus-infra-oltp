@@ -1,0 +1,23 @@
+---
+# oltp_patroni role defaults
+
+# PostgreSQL major version. Installed via the PGDG apt repo (apt.postgresql.org).
+# The repo path encodes the codename + major; bumping requires updating both
+# `oltp_node_pg_version` and the apt source line in tasks/main.yml.
+oltp_node_pg_version: "17"
+
+# Patroni version. Installed via PyPI pip with the [etcd3] extras (pulls the
+# etcd3 v3 API gRPC client). Patroni 4.x is required for the cleaner watchdog
+# integration + the new switchover RPC flow.
+oltp_node_patroni_version: "4.0.5"
+
+# System account every PG process runs as. The postgresql-{{ version }} apt
+# package creates the postgres user+group; we use it as-is (no custom UID).
+oltp_node_pg_user: postgres
+oltp_node_pg_group: postgres
+
+# Per-node dirs (config + cert material + Patroni-managed PGDATA + log
+# rendered by Terraform role-overlay-patroni-*.tf in nexus-infra-oltp).
+oltp_node_patroni_config_dir: /etc/nexus-patroni
+oltp_node_patroni_data_dir: /var/lib/nexus-patroni
+oltp_node_patroni_log_dir: /var/log/nexus-patroni

@@ -1,0 +1,7 @@
+---
+oltp_node_etcd_version: "3.5.16"
+oltp_node_etcd_user: etcd
+oltp_node_etcd_group: etcd
+oltp_node_etcd_config_dir: /etc/nexus-etcd
+oltp_node_etcd_data_dir: /var/lib/nexus-etcd
+oltp_node_etcd_log_dir: /var/log/nexus-etcd

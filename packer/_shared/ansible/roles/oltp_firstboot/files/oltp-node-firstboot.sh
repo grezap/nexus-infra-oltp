@@ -151,12 +151,26 @@ case "$VMNET11_IP" in
   192.168.70.54) HOSTNAME=proxysql-1; VMNET10_IP=192.168.10.54; ROLE=proxysql; CLUSTER=proxysql ;;
   192.168.70.55) HOSTNAME=proxysql-2; VMNET10_IP=192.168.10.55; ROLE=proxysql; CLUSTER=proxysql ;;
 
-  # ─── 0.G.4 -- Patroni + etcd + HAProxy (7 nodes) -- TODO ──────────────
-  # 192.168.70.61..67) patroni-{1..3}, etcd-{1..3}, haproxy-1
+  # ─── 0.G.4 -- Patroni PostgreSQL HA + etcd DCS + HAProxy HA pair (8 nodes) ─
+  # 3 Patroni nodes share CLUSTER=patroni (identity dir /etc/nexus-patroni,
+  # group postgres). 3 etcd nodes are their own engine cluster CLUSTER=etcd
+  # (/etc/nexus-etcd, group etcd). 2 HAProxy nodes CLUSTER=haproxy
+  # (/etc/nexus-haproxy, group haproxy) -- an HA pair with keepalived-floated
+  # VIP .60 mirroring the 0.G.3 proxysql-1/2 + VIP .50 pattern. All 3 templates
+  # carry mTLS leaf certs via the same Vault PKI role `patroni-server`; the
+  # haproxy nodes additionally carry the VIP .60 in their cert IP-SANs.
+  192.168.70.61) HOSTNAME=pg-primary;   VMNET10_IP=192.168.10.61; ROLE=patroni; CLUSTER=patroni ;;
+  192.168.70.62) HOSTNAME=pg-replica-1; VMNET10_IP=192.168.10.62; ROLE=patroni; CLUSTER=patroni ;;
+  192.168.70.63) HOSTNAME=pg-replica-2; VMNET10_IP=192.168.10.63; ROLE=patroni; CLUSTER=patroni ;;
+  192.168.70.64) HOSTNAME=etcd-1;       VMNET10_IP=192.168.10.64; ROLE=etcd;    CLUSTER=etcd    ;;
+  192.168.70.65) HOSTNAME=etcd-2;       VMNET10_IP=192.168.10.65; ROLE=etcd;    CLUSTER=etcd    ;;
+  192.168.70.66) HOSTNAME=etcd-3;       VMNET10_IP=192.168.10.66; ROLE=etcd;    CLUSTER=etcd    ;;
+  192.168.70.67) HOSTNAME=haproxy-pg-1; VMNET10_IP=192.168.10.67; ROLE=haproxy; CLUSTER=haproxy ;;
+  192.168.70.68) HOSTNAME=haproxy-pg-2; VMNET10_IP=192.168.10.68; ROLE=haproxy; CLUSTER=haproxy ;;
 
   *)
     echo "$LOG_PREFIX ERROR: unknown VMnet11 IP '$VMNET11_IP' -- not a 0.G OLTP tier IP" >&2
-    echo "$LOG_PREFIX recognised IPs: redis-1..6 (.81/.82/.83/.84/.87/.89); mongo-1..3 (.71/.72/.73); pxc-node-1..3 (.51/.52/.53); proxysql-1..2 (.54/.55); other 0.G.* clusters land later sub-phases." >&2
+    echo "$LOG_PREFIX recognised IPs: redis-1..6 (.81/.82/.83/.84/.87/.89); mongo-1..3 (.71/.72/.73); pxc-node-1..3 (.51/.52/.53); proxysql-1..2 (.54/.55); pg-{primary,replica-1,replica-2} (.61/.62/.63); etcd-1..3 (.64/.65/.66); haproxy-pg-{1,2} (.67/.68); other 0.G.* clusters land later sub-phases." >&2
     exit 1
     ;;
 esac
@@ -170,6 +184,9 @@ case "$CLUSTER" in
   mongo)    IDENTITY_DIR=/etc/nexus-mongo;    IDENTITY_GROUP=mongodb ;;
   percona)  IDENTITY_DIR=/etc/nexus-percona;  IDENTITY_GROUP=mysql ;;
   proxysql) IDENTITY_DIR=/etc/nexus-proxysql; IDENTITY_GROUP=proxysql ;;
+  patroni)  IDENTITY_DIR=/etc/nexus-patroni;  IDENTITY_GROUP=postgres ;;
+  etcd)     IDENTITY_DIR=/etc/nexus-etcd;     IDENTITY_GROUP=etcd ;;
+  haproxy)  IDENTITY_DIR=/etc/nexus-haproxy;  IDENTITY_GROUP=haproxy ;;
   # NOTE: percona cluster covers pxc-node-N hosts only (PXC nodes own
   # /etc/nexus-percona as group mysql). ProxySQL nodes get their own
   # /etc/nexus-proxysql owned by group proxysql (apt-shipped) -- they

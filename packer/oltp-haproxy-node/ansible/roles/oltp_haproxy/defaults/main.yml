@@ -1,0 +1,6 @@
+---
+oltp_node_haproxy_version: "3.0"
+oltp_node_haproxy_user: haproxy
+oltp_node_haproxy_group: haproxy
+oltp_node_haproxy_config_dir: /etc/nexus-haproxy
+oltp_node_haproxy_log_dir: /var/log/nexus-haproxy

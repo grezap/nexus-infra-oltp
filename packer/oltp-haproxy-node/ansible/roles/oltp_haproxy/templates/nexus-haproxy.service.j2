@@ -1,0 +1,31 @@
+[Unit]
+Description=Nexus HAProxy (PostgreSQL LB; Patroni REST health-routed)
+Documentation=https://www.haproxy.org/
+After=network-online.target oltp-node-firstboot.service
+Wants=network-online.target
+Requires=oltp-node-firstboot.service
+ConditionPathExists={{ oltp_node_haproxy_config_dir }}/haproxy.cfg
+StartLimitBurst=15
+StartLimitIntervalSec=600
+
+[Service]
+Type=notify
+User={{ oltp_node_haproxy_user }}
+Group={{ oltp_node_haproxy_group }}
+EnvironmentFile=-/etc/default/nexus-haproxy
+ExecStartPre=/usr/sbin/haproxy -c -f {{ oltp_node_haproxy_config_dir }}/haproxy.cfg
+ExecStart=/usr/sbin/haproxy -Ws -f {{ oltp_node_haproxy_config_dir }}/haproxy.cfg -p /run/nexus-haproxy/haproxy.pid
+ExecReload=/usr/sbin/haproxy -c -f {{ oltp_node_haproxy_config_dir }}/haproxy.cfg
+ExecReload=/bin/kill -USR2 $MAINPID
+KillMode=mixed
+Restart=on-failure
+RestartSec=5
+RuntimeDirectory=nexus-haproxy
+RuntimeDirectoryMode=0755
+LimitNOFILE=65536
+TasksMax=infinity
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

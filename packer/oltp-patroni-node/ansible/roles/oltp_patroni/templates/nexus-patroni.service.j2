@@ -1,0 +1,56 @@
+[Unit]
+Description=Nexus Patroni (PostgreSQL HA orchestrator)
+Documentation=https://patroni.readthedocs.io/
+After=network-online.target oltp-node-firstboot.service
+Wants=network-online.target
+Requires=oltp-node-firstboot.service
+# Delivered DISABLED by the oltp_patroni Packer role. role-overlay-patroni-
+# bootstrap.tf renders {{ oltp_node_patroni_config_dir }}/patroni.yml,
+# role-overlay-patroni-tls.tf has already rendered server-cert.pem +
+# server-key.pem + ca.pem + 4 KV secret files, and the bootstrap overlay
+# orchestrates the cluster-aware start (initdb on the first leader, joiner
+# replicas pg_basebackup from the leader, etcd DCS does the election).
+ConditionPathExists={{ oltp_node_patroni_config_dir }}/patroni.yml
+# StartLimit* in [Unit] per systemd.unit(5). Patroni's PG bootstrap
+# (initdb + first-WAL-segment + applying pg_hba) can take ~2 min on lab
+# disks; pg_basebackup on a joiner is similar. Generous limits so systemd
+# does not give up while Patroni waits for etcd quorum + initdb.
+StartLimitBurst=15
+StartLimitIntervalSec=600
+
+[Service]
+# Type=simple: Patroni's process model is a long-lived Python process that
+# forks PG as a child; it does not implement sd_notify(). Restart-on-failure
+# handles crash recovery; the etcd watchdog handles fence-on-lost-DCS.
+Type=simple
+User={{ oltp_node_pg_user }}
+Group={{ oltp_node_pg_group }}
+ExecStart=/usr/local/bin/patroni {{ oltp_node_patroni_config_dir }}/patroni.yml
+ExecReload=/bin/kill -HUP $MAINPID
+# Patroni's SIGTERM handler does a graceful stop -- demotes if leader (other
+# replicas can be promoted), or shuts PG down cleanly if replica. The TERM
+# -> exit cycle includes a pg_ctl stop -m fast, then Patroni exits.
+KillMode=process
+KillSignal=SIGTERM
+TimeoutStopSec=120
+Restart=on-failure
+RestartSec=10
+# RuntimeDirectory= -- systemd auto-creates /run/nexus-patroni on every
+# service start (per memory/feedback_systemd_runtime_directory_tmpfs.md;
+# /var/run is tmpfs and an install-time mkdir does not survive reboot).
+# Patroni writes pid here.
+RuntimeDirectory=nexus-patroni
+RuntimeDirectoryMode=0755
+LimitNOFILE=64000
+LimitNPROC=64000
+TasksMax=infinity
+StandardOutput=journal
+StandardError=journal
+# Patroni's etcd watchdog (when wired in via patroni.yml's watchdog: {mode: required})
+# uses /dev/watchdog -- this would be a kernel WDT but we run softdog on the
+# Debian guest. Patroni only opens /dev/watchdog if mode != off; we leave it
+# off in 0.G.4 (no hardware watchdog in the VMware guest; softdog is loaded by
+# the bootstrap overlay if enabled later).
+
+[Install]
+WantedBy=multi-user.target

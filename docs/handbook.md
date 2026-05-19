@@ -1,8 +1,10 @@
 # nexus-infra-oltp operator handbook
 
-> **Status (Phase 0.G.1 + 0.G.2 + 0.G.3 + 0.G.3.5):** ✅ ALL THREE OLTP
-> clusters **PROVEN cold-rebuildable from per-engine templates +
-> per-cluster Terraform states (2026-05-18)**:
+> **Status (Phase 0.G.1 + 0.G.2 + 0.G.3 + 0.G.3.5 + 0.G.4):** ✅ all four
+> OLTP cluster sub-phases shipped per-cluster + per-engine. 0.G.1+0.G.2+
+> 0.G.3+0.G.3.5 **PROVEN cold-rebuildable (2026-05-18)**; 0.G.4 (Patroni
+> + etcd + HAProxy) scaffolded 2026-05-19 — ready to apply via the same
+> per-cluster wrapper pattern, ratification pending:
 >
 > - **0.G.1** (6-node Redis Cluster mTLS) — smoke ALL GREEN on
 >   `envs/oltp-redis/` via `oltp-redis-node.vmx`.
@@ -12,6 +14,16 @@
 >   ALL GREEN on `envs/oltp-percona/` via `oltp-pxc-node.vmx` +
 >   `oltp-proxysql-node.vmx`. End-to-end write via VIP propagates to
 >   every PXC backend (mTLS + Galera replication confirmed).
+> - **0.G.4** (3 Patroni PG 17 + 3 etcd DCS + 2 HAProxy HA pair + VRRP VIP
+>   `192.168.70.60`) — `envs/oltp-patroni/` via `oltp-patroni-node.vmx` +
+>   `oltp-etcd-node.vmx` + `oltp-haproxy-node.vmx` (3 per-engine templates).
+>   Apps connect to **`<VIP>:5432`** which routes to the current Patroni
+>   leader via REST `/leader` health probes; the VIP floats between
+>   `haproxy-pg-1` (priority 110 MASTER) and `haproxy-pg-2` (priority 100
+>   BACKUP) via keepalived **unicast** mode (mirrors the 0.G.3 proxysql-1/2
+>   + VIP `.50` pattern — no SPOF on the LB tier). etcd 3-member raft
+>   quorum holds the DCS with HTTP basic-auth RBAC; PG streaming
+>   replication over mTLS on the VMnet10 backplane.
 >
 > Cold-rebuild surfaced **11 additional transients** beyond the 16 from
 > the legacy monolithic 0.G.3 attempt; all root-caused + permanent fixes
@@ -31,16 +43,18 @@
 
 Cross-tier dependencies (in hard-ordering for cold-rebuild):
 
-- **Foundation tier** ([`nexus-infra-vmware/envs/foundation`](https://github.com/grezap/nexus-infra-vmware)) — `nexus-gateway` providing DHCP + DNS via dnsmasq. The OLTP-tier dhcp reservations overlay is **v3 as of 0.G.3** (single-file marker, atomic replace):
+- **Foundation tier** ([`nexus-infra-vmware/envs/foundation`](https://github.com/grezap/nexus-infra-vmware)) — `nexus-gateway` providing DHCP + DNS via dnsmasq. The OLTP-tier dhcp reservations overlay is **v5 as of 0.G.4** (single-file marker, atomic replace):
   - **0.G.1** (Redis): 6 `dhcp-host` reservations pinning redis-1..6 MACs (`:70-:75`) to `.81/.82/.83/.84/.87/.89` (skip `.85/.86/.88` which belong to kafka).
   - **0.G.2** (Mongo): +3 mongo-1..3 MACs (`:76-:78`) to `.71/.72/.73`.
   - **0.G.3** (Percona + ProxySQL): +5 MACs (`:79-:7D`) pxc-node-1..3 → `.51/.52/.53` + proxysql-1..2 → `.54/.55`. The VIP `.50` is NOT a dhcp reservation -- it floats between proxysql-1/2 via VRRP/keepalived, configured per-node by the oltp env.
-  - Owned by `terraform/envs/foundation/role-overlay-gateway-oltp-reservations.tf` (v3).
+  - **0.G.4** (Patroni + etcd + HAProxy HA pair): +8 MACs (`:7E-:85`) pg-primary/pg-replica-{1,2} → `.61/.62/.63` + etcd-{1,2,3} → `.64/.65/.66` + haproxy-pg-{1,2} → `.67/.68`. The VIP `.60` is NOT a dhcp reservation -- it floats between haproxy-pg-1/-2 via VRRP/keepalived (priority 110 MASTER + 100 BACKUP, unicast mode), configured per-node by the oltp env.
+  - Owned by `terraform/envs/foundation/role-overlay-gateway-oltp-reservations.tf` (v5).
 - **Security tier** ([`nexus-infra-vmware/envs/security`](https://github.com/grezap/nexus-infra-vmware)) — 3-node Vault HA + `vault-transit` auto-unseal. Per-cluster PKI + AppRole + KV state:
   - **0.G.1** (Redis): PKI role `redis-server` (90 d TTL, 21 allowed_domains) + 6 `nexus-agent-redis-N` policies + 6 AppRoles + 6 sidecars at `$HOME\.nexus\vault-agent-oltp-redis-redis-N.json`.
   - **0.G.2** (Mongo): PKI role `mongo-server` + 3 `nexus-agent-mongo-N` policies + 3 AppRoles + 3 sidecars (`vault-agent-oltp-mongo-mongo-N.json`) + 2 KV sticky-seeds (`nexus/oltp/mongo/keyfile` + `nexus/oltp/mongo/smoke-user-password`).
   - **0.G.3** (Percona + ProxySQL): PKI role `percona-server` (90 d TTL, 17 allowed_domains covering pxc-node-1..3 + proxysql-1..2 in bare + .nexus.lab + .percona.nexus.lab forms) + 5 `nexus-agent-pxc-N` + `nexus-agent-proxysql-N` policies (role-differentiated KV grants: PXC reads cluster/monitor/root, ProxySQL reads cluster/monitor/proxysql-admin) + 5 AppRoles + 5 sidecars (`vault-agent-oltp-percona-<host>.json`) + 4 KV sticky-seeds at `nexus/oltp/percona/{cluster,monitor,root,proxysql-admin}-password` (each 32-char hex).
-  - Owned by `terraform/envs/security/role-overlay-vault-{pki-{redis,mongo,percona},agent-{redis,mongo,percona}-{policies,approles},mongo-{keyfile,smoke-user}-seed,percona-cluster-creds-seed}.tf`.
+  - **0.G.4** (Patroni + etcd + HAProxy HA pair): PKI role `patroni-server` (90 d TTL, 26 allowed_domains covering the 8 hostnames in bare + .nexus.lab + .patroni.nexus.lab forms; haproxy nodes additionally carry the VIP `.60` in their cert IP-SANs) + 8 `nexus-agent-{pg-primary,pg-replica-{1,2},etcd-{1,2,3},haproxy-pg-{1,2}}` policies (role-differentiated KV grants: Patroni reads 4 secrets, etcd reads 2, HAProxy reads 2) + 8 AppRoles + 8 sidecars (`vault-agent-oltp-patroni-<host>.json`) + 5 KV sticky-seeds at `nexus/oltp/patroni/{etcd-root,patroni-rest,postgres-superuser,postgres-replication,haproxy-stats}-password` (each 32-char hex).
+  - Owned by `terraform/envs/security/role-overlay-vault-{pki-{redis,mongo,percona,patroni},agent-{redis,mongo,percona,patroni}-{policies,approles},mongo-{keyfile,smoke-user}-seed,percona-cluster-creds-seed,patroni-cluster-creds-seed}.tf`.
 
 **Build-host tools** (pwsh-native per `feedback_build_host_pwsh_native.md` — no `make` required):
 
@@ -53,13 +67,13 @@ Cross-tier dependencies (in hard-ordering for cold-rebuild):
 
 ## §1 Phase walkthrough
 
-### §1.1 Build the Packer templates (4 per-engine)
+### §1.1 Build the Packer templates (7 per-engine)
 
-Each OLTP engine gets its own per-engine template per `memory/feedback_per_cluster_state_per_engine_template.md`. Build each in turn (or parallel terminals if your build host has the headroom — shared `PACKER_CACHE_DIR` reuses the Debian 13 ISO across all 4):
+Each OLTP engine gets its own per-engine template per `memory/feedback_per_cluster_state_per_engine_template.md`. Build each in turn (or parallel terminals if your build host has the headroom — shared `PACKER_CACHE_DIR` reuses the Debian 13 ISO across all 7):
 
 ```pwsh
 $env:PACKER_CACHE_DIR = 'H:\VMS\packer_cache'   # shares the Debian ISO download
-foreach ($t in 'oltp-redis-node','oltp-mongo-node','oltp-pxc-node','oltp-proxysql-node') {
+foreach ($t in 'oltp-redis-node','oltp-mongo-node','oltp-pxc-node','oltp-proxysql-node','oltp-patroni-node','oltp-etcd-node','oltp-haproxy-node') {
   Push-Location "packer\$t"
   packer init .
   packer build -force .
@@ -75,8 +89,11 @@ Per-template bake time + artifact:
 | `oltp-mongo-node`    | ~8 min  | `H:\VMS\NexusPlatform\_templates\oltp-mongo-node\oltp-mongo-node.vmx`       | ~3.3 GB |
 | `oltp-pxc-node`      | ~9 min  | `H:\VMS\NexusPlatform\_templates\oltp-pxc-node\oltp-pxc-node.vmx`           | ~3.9 GB |
 | `oltp-proxysql-node` | ~10 min | `H:\VMS\NexusPlatform\_templates\oltp-proxysql-node\oltp-proxysql-node.vmx` | ~2.9 GB |
+| `oltp-patroni-node`  | ~10 min | `H:\VMS\NexusPlatform\_templates\oltp-patroni-node\oltp-patroni-node.vmx`   | ~3.2 GB |
+| `oltp-etcd-node`     | ~6 min  | `H:\VMS\NexusPlatform\_templates\oltp-etcd-node\oltp-etcd-node.vmx`         | ~2.4 GB |
+| `oltp-haproxy-node`  | ~7 min  | `H:\VMS\NexusPlatform\_templates\oltp-haproxy-node\oltp-haproxy-node.vmx`   | ~2.4 GB |
 
-Total ~35 min sequential (vs ~40-55 min for the legacy monolithic `oltp-node` which bundled everything in a single template — removed in 0.G.3.5c chunk 2). Each per-engine template is ~50-55% the footprint of the legacy monolithic.
+Total ~58 min sequential across all 7 (vs ~40-55 min for the legacy monolithic `oltp-node` which bundled redis/mongo/pxc/proxysql in one template — removed in 0.G.3.5c chunk 2). Each per-engine template is small + focused; you only rebuild the one whose role you touched.
 
 Spot-check any built template before promoting to apply:
 
@@ -88,9 +105,12 @@ ssh nexusadmin@<dhcp-assigned-IP>      # password: nexus-packer-build-only
 systemctl is-active nexus-redis.service       # -> inactive (DISABLED; gates on /etc/nexus-redis/redis.conf)
 systemctl is-enabled redis-server.service     # -> masked (apt-shipped unit defensively masked)
 redis-server --version                        # -> Redis server v=8.0.x
-# For mongo template: systemctl is-active nexus-mongo.service ; mongod --version
-# For pxc template:   systemctl is-active nexus-percona{,-bootstrap}.service ; mysqld --version ; xtrabackup --version
+# For mongo template:    systemctl is-active nexus-mongo.service ; mongod --version
+# For pxc template:      systemctl is-active nexus-percona{,-bootstrap}.service ; mysqld --version ; xtrabackup --version
 # For proxysql template: systemctl is-active nexus-proxysql.service ; proxysql --version ; keepalived --version ; which mysql
+# For patroni template:  systemctl is-active nexus-patroni.service ; /usr/lib/postgresql/17/bin/postgres --version ; /usr/local/bin/patroni --version ; systemctl is-enabled postgresql.service (=>masked)
+# For etcd template:     systemctl is-active nexus-etcd.service ; /usr/local/bin/etcd --version ; /usr/local/bin/etcdctl version
+# For haproxy template:  systemctl is-active nexus-haproxy.service ; haproxy -v ; systemctl is-enabled haproxy.service (=>masked)
 & 'C:\Program Files (x86)\VMware\VMware Workstation\vmrun.exe' stop H:\VMS\NexusPlatform\_templates\oltp-redis-node\oltp-redis-node.vmx hard
 ```
 
@@ -104,7 +124,9 @@ redis-server --version                        # -> Redis server v=8.0.x
 │      adds ALL OLTP-tier dnsmasq dhcp-host reservations on nexus-gateway:      │
 │        v1 = 6 redis  (0.G.1)                                                   │
 │        v2 = +3 mongo (0.G.2)                                                   │
-│        v3 = +5 pxc/proxysql (0.G.3)  <- current marker                         │
+│        v3 = +5 pxc/proxysql (0.G.3)                                            │
+│        v5 = +8 patroni/etcd/haproxy-pair (0.G.4)  <- current marker            │
+│             (v4 was the abandoned single-HAProxy variant; v5 is the HA pair)  │
 │      (Single-file overlay; atomic replace on version bump.)                    │
 │                                                                                │
 │ 2. nexus-infra-vmware\scripts\security.ps1 apply                              │
@@ -115,27 +137,34 @@ redis-server --version                        # -> Redis server v=8.0.x
 │        0.G.3: pki_int/roles/percona-server + 5 percona policies (role-diff'd  │
 │               for PXC vs ProxySQL KV grants) + 5 AppRoles + 5 sidecars +      │
 │               4 KV sticky-seeds (cluster + monitor + root + proxysql-admin)    │
+│        0.G.4: pki_int/roles/patroni-server + 8 patroni-tier policies          │
+│               (role-diff'd: Patroni=4 KV, etcd=2 KV, HAProxy=2 KV) + 8        │
+│               AppRoles + 8 sidecars + 5 KV sticky-seeds (etcd-root +          │
+│               patroni-rest + postgres-superuser + postgres-replication +      │
+│               haproxy-stats)                                                   │
 │      (All toggles default true; no override needed for steady-state apply.)    │
 │                                                                                │
 │ 3a. nexus-infra-oltp\scripts\oltp-redis.ps1   apply  (6 VMs;  ~5  min)        │
 │ 3b. nexus-infra-oltp\scripts\oltp-mongo.ps1   apply  (3 VMs;  ~5  min)        │
 │ 3c. nexus-infra-oltp\scripts\oltp-percona.ps1 apply  (5 VMs;  ~10 min)        │
+│ 3d. nexus-infra-oltp\scripts\oltp-patroni.ps1 apply  (8 VMs;  ~15 min)        │
 │      Each script drives its own per-cluster terraform state:                   │
 │        envs/oltp-redis/   ← oltp-redis-node.vmx   (Packer-built per-engine)    │
 │        envs/oltp-mongo/   ← oltp-mongo-node.vmx                                │
 │        envs/oltp-percona/ ← oltp-pxc-node.vmx + oltp-proxysql-node.vmx         │
+│        envs/oltp-patroni/ ← oltp-patroni-node.vmx + oltp-etcd-node.vmx +       │
+│                              oltp-haproxy-node.vmx (HA pair + VRRP VIP .60)   │
 │      Per-cluster nftables overlays open only that cluster's ports — no cross-  │
 │      cluster cascade (per memory/feedback_per_cluster_state_per_engine_template.md).
 │                                                                                │
-│      The 3 cluster applies are INDEPENDENT (no inter-cluster dep) — run in     │
-│      any order, or in parallel terminals. Mongo+Percona apps will later        │
-│      consume each other only at the app layer, not at the infra layer.         │
+│      The 4 cluster applies are INDEPENDENT (no inter-cluster dep) — run in     │
+│      any order, or in parallel terminals.                                      │
 └────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Cannot reorder steps 1→2→3**: each cluster's `*_vault_agent` resource uses `filesha256()` on its sidecar JSON at plan time, so the security env MUST have written them first. A premature `oltp-* apply` fails fast at plan time with `Call to function "filesha256" failed: open ...vault-agent-oltp-{redis,mongo,percona}-<host>.json: The system cannot find the file specified`.
+**Cannot reorder steps 1→2→3**: each cluster's `*_vault_agent` resource uses `filesha256()` on its sidecar JSON at plan time, so the security env MUST have written them first. A premature `oltp-* apply` fails fast at plan time with `Call to function "filesha256" failed: open ...vault-agent-oltp-{redis,mongo,percona,patroni}-<host>.json: The system cannot find the file specified`.
 
-**Within step 3**: 3a/3b/3c are independent — terraform states don't reference each other. The only practical ordering is "Redis before apps" (Redis is the fastest + most-used cache; bring it up first so other smoke tests have something to point at).
+**Within step 3**: 3a/3b/3c/3d are independent — terraform states don't reference each other. The only practical ordering is "Redis before apps" (Redis is the fastest + most-used cache; bring it up first so other smoke tests have something to point at).
 
 ### §1.3 Apply, §1.5 selective ops, §1.6 tear down → see §1.7
 
@@ -153,9 +182,10 @@ The legacy monolithic `scripts/oltp.ps1` was removed in 0.G.3.5c chunk 2. Its ol
 pwsh -File scripts\oltp-redis.ps1   smoke   # 0.G.1: ~50 checks across 9 sections
 pwsh -File scripts\oltp-mongo.ps1   smoke   # 0.G.2: ~45 checks across 9 sections
 pwsh -File scripts\oltp-percona.ps1 smoke   # 0.G.3: ~80 checks across 12 sections
+pwsh -File scripts\oltp-patroni.ps1 smoke   # 0.G.4: ~90 checks across 13 sections (etcd quorum + Patroni shape + HAProxy HA pair + VRRP VIP)
 ```
 
-Each smoke script (`smoke-0.G.{1,2,3}.ps1` under the hood) runs reachability → firstboot → identity → vault-agent → TLS material → per-cluster config → service active → TLS listener → cluster health → end-to-end round-trip. Each check echoes `[OK]/[FAIL]`; exits 1 on any failure, 0 on all-green.
+Each smoke script (`smoke-0.G.{1,2,3,4}.ps1` under the hood) runs reachability → firstboot → identity → vault-agent → TLS material → per-cluster config → service active → TLS listener → cluster health → end-to-end round-trip. Each check echoes `[OK]/[FAIL]`; exits 1 on any failure, 0 on all-green.
 
 Smoke is independent of apply — re-runnable any time against a stable cluster.
 
@@ -167,13 +197,16 @@ Smoke is independent of apply — re-runnable any time against a stable cluster.
 
 ### §1.7 Per-cluster scripts (canonical interface)
 
-Three wrappers around the per-cluster terraform states, each with the standard verb shape (`apply | destroy | smoke | cycle | plan | validate`):
+Four wrappers around the per-cluster terraform states, each with the standard verb shape (`apply | destroy | smoke | cycle | plan | validate`):
 
 | Script | Env | Template(s) | Smoke | VMs | Apply wall-clock |
 |---|---|---|---|---|---|
 | `scripts/oltp-redis.ps1` | `terraform/envs/oltp-redis/` | `oltp-redis-node.vmx` | `smoke-0.G.1.ps1` | 6 | ~5 min |
 | `scripts/oltp-mongo.ps1` | `terraform/envs/oltp-mongo/` | `oltp-mongo-node.vmx` | `smoke-0.G.2.ps1` | 3 | ~5 min |
 | `scripts/oltp-percona.ps1` | `terraform/envs/oltp-percona/` | `oltp-pxc-node.vmx` + `oltp-proxysql-node.vmx` | `smoke-0.G.3.ps1` | 5 | ~10 min |
+| `scripts/oltp-patroni.ps1` | `terraform/envs/oltp-patroni/` | `oltp-patroni-node.vmx` + `oltp-etcd-node.vmx` + `oltp-haproxy-node.vmx` | `smoke-0.G.4.ps1` | 8 | ~15 min |
+
+**Patroni HA pair design (alignment with 0.G.3):** `vms.yaml` cluster `postgres` ships an HAProxy HA pair (`haproxy-pg-1` + `haproxy-pg-2`) + VRRP-floated VIP `192.168.70.60` mirroring the 0.G.3 proxysql-1/2 + VIP `.50` pattern. Both haproxy nodes run identical `haproxy.cfg`; keepalived elects exactly one as MASTER (priority 110 default = `haproxy-pg-1`); apps connect to `<VIP>:5432`. Unicast VRRP for the same reason as proxysql -- VMware VMnet11 doesn't reliably forward IPv4 multicast `224.0.0.18` (lesson baked at 0.G.3.5c chunk 1 transient #22). The haproxy nodes' PKI leaf certs carry the VIP in their IP-SANs so client TLS handshakes validate regardless of which haproxy currently holds the VIP. There is no SPOF on the LB tier.
 
 **Full per-cluster cold-rebuild:**
 
@@ -218,6 +251,27 @@ pwsh -File scripts\oltp-percona.ps1 apply -Vars enable_galera_cluster_bootstrap=
 
 # PERCONA — PXC + ProxySQL up but no VIP (apps hit proxysql-1 directly on .54)
 pwsh -File scripts\oltp-percona.ps1 apply -Vars enable_keepalived_vip=false
+
+# PATRONI — etcd quorum only (3 etcd VMs; no patroni, no haproxy -- useful for etcd-side debug)
+pwsh -File scripts\oltp-patroni.ps1 apply -Vars enable_pg_primary=false,enable_pg_replica_1=false,enable_pg_replica_2=false,enable_haproxy_pg_1=false,enable_haproxy_pg_2=false,enable_patroni_bootstrap=false,enable_haproxy_config=false,enable_haproxy_keepalived=false
+
+# PATRONI — iterate just the patroni-bootstrap one-shot (assumes etcd up + TLS + KV creds rendered)
+pwsh -File scripts\oltp-patroni.ps1 apply -Vars enable_nftables_backplane=false,enable_patroni_vault_agents=false,enable_patroni_tls=false,enable_etcd_bootstrap=false,enable_haproxy_config=false,enable_haproxy_keepalived=false
+
+# PATRONI — iterate just the haproxy-config + haproxy-keepalived (assumes etcd + patroni up)
+pwsh -File scripts\oltp-patroni.ps1 apply -Vars enable_nftables_backplane=false,enable_patroni_vault_agents=false,enable_patroni_tls=false,enable_etcd_bootstrap=false,enable_patroni_bootstrap=false
+
+# PATRONI — skip etcd-bootstrap (debug etcd manually before letting Patroni dial it)
+pwsh -File scripts\oltp-patroni.ps1 apply -Vars enable_etcd_bootstrap=false
+
+# PATRONI — skip patroni-bootstrap (initdb leader manually via patronictl + watch)
+pwsh -File scripts\oltp-patroni.ps1 apply -Vars enable_patroni_bootstrap=false
+
+# PATRONI — HAProxy pair + config without VRRP VIP (apps hit haproxy-pg-1 directly on .67 -- debugging only)
+pwsh -File scripts\oltp-patroni.ps1 apply -Vars enable_haproxy_keepalived=false
+
+# PATRONI — single HAProxy only (haproxy-pg-1 + VIP; haproxy-pg-2 absent -- debug-only, defeats HA)
+pwsh -File scripts\oltp-patroni.ps1 apply -Vars enable_haproxy_pg_2=false,enable_haproxy_keepalived=false
 ```
 
 **Per-cluster destroy** is bounded to that cluster only — never touches the other 2:
@@ -239,7 +293,7 @@ This is the key win over the legacy monolithic `oltp.ps1 destroy` which would te
 | 0.G.3.5b | per-cluster Terraform state refactor (3 NEW) | `terraform/envs/oltp-{redis,mongo,percona}/` ✅ | reuses 0.G.3.5a templates | per-cluster smoke gates | ✅ live-applied 2026-05-18 in 0.G.3.5c chunk 1; 3 operator wrappers `scripts/oltp-{redis,mongo,percona}.ps1` ✅ | 2026-05-18 |
 | 0.G.3.5c chunk 1 | live cold-rebuild via per-cluster envs + permanent fixes for 11 new transients | proves 0.G.3.5b states | builds 0.G.3.5a templates | smoke gates per cluster ALL GREEN | ✅ PROVEN end-to-end 2026-05-18 ([commit d076abd](https://github.com/grezap/nexus-infra-oltp/commit/d076abd)) | 2026-05-18 |
 | 0.G.3.5c chunk 2 | delete legacy `packer/oltp-node/` + `terraform/envs/oltp/` + `scripts/oltp.ps1` + CI matrix cleanup + handbook canonicalization | — | — | — | ✅ removed 2026-05-18 (this commit); CI matrix scoped to 4 per-engine templates + 3 per-cluster envs only | 2026-05-18 |
-| 0.G.4 | Patroni + etcd + HAProxy (7 nodes) | TBD | NEW oltp-patroni-node + oltp-etcd-node + oltp-haproxy-node (per-engine pattern from 0.G.3.5a) | `smoke-0.G.4.ps1` | not started | — |
+| 0.G.4 | Patroni + etcd + HAProxy HA pair + VRRP VIP `.60` (8 nodes) | `terraform/envs/oltp-patroni/` ✅ | `packer/oltp-{patroni,etcd,haproxy}-node/` ✅ (3 per-engine templates; haproxy template bakes keepalived) | `smoke-0.G.4.ps1` ✅ (~90 checks, 13 sections) | ✅ scaffolded 2026-05-19 -- foundation v5 + security patroni overlays (PKI/policies/AppRoles/sidecars 7→8 nodes) + 3 Packer templates + per-cluster TF env (7 overlays incl. NEW haproxy-keepalived) + operator wrapper + smoke gate + 4 demo playbooks. Ready to apply; ratification pending. | — |
 | 0.G.7 | SQL Server FCI + AG (4 ws2025 nodes) | TBD | NEW ws2025 template | `smoke-0.G.7.ps1` | not started | — |
 
 (0.G.5 ClickHouse + 0.G.6 StarRocks belong to the sibling `nexus-infra-analytics` repo.)
@@ -255,31 +309,35 @@ Canonical per-cluster cycle (each cluster independent, can be ordered or paralle
 ```pwsh
 cd <repo-root>\workspace\nexus-infra-oltp
 
-# 1. Per-cluster destroy (bounded to that cluster only -- other 2 stay live)
+# 1. Per-cluster destroy (bounded to that cluster only -- other 3 stay live)
 pwsh -File scripts\oltp-redis.ps1   destroy   # 6 redis VMs
 pwsh -File scripts\oltp-mongo.ps1   destroy   # 3 mongo VMs
 pwsh -File scripts\oltp-percona.ps1 destroy   # 5 percona VMs (3 PXC + 2 ProxySQL)
+pwsh -File scripts\oltp-patroni.ps1 destroy   # 8 patroni-tier VMs (3 PG + 3 etcd + 2 HAProxy)
 
 # 2. Per-cluster apply (foundation + security stay live; this clones + brings up cold)
 pwsh -File scripts\oltp-redis.ps1   apply
 pwsh -File scripts\oltp-mongo.ps1   apply
 pwsh -File scripts\oltp-percona.ps1 apply
+pwsh -File scripts\oltp-patroni.ps1 apply
 
 # 3. Per-cluster smoke
 pwsh -File scripts\oltp-redis.ps1   smoke    # 0.G.1 exit gate
 pwsh -File scripts\oltp-mongo.ps1   smoke    # 0.G.2 exit gate
 pwsh -File scripts\oltp-percona.ps1 smoke    # 0.G.3 exit gate
+pwsh -File scripts\oltp-patroni.ps1 smoke    # 0.G.4 exit gate
 
 # Shortcut: pwsh -File scripts\oltp-<cluster>.ps1 cycle does destroy -> apply -> smoke
 ```
 
-Wall-clock observed at the 0.G.3.5c chunk 1 ratification 2026-05-18:
+Wall-clock observed at the 0.G.3.5c chunk 1 ratification 2026-05-18 (0.G.4 row is projected; ratification pending):
 
 | Cluster | Destroy | Apply (cold) | Smoke | Notes |
 |---|---|---|---|---|
 | oltp-redis    | ~20s | ~5-7 min   | ~25s | Best-case; #18 (orphan masters) needs live CLUSTER REPLICATE recovery first time |
-| oltp-mongo    | ~20s | ~5 min     | ~25s | Cleanest of the 3 |
+| oltp-mongo    | ~20s | ~5 min     | ~25s | Cleanest of the 3 (now 4) clusters |
 | oltp-percona  | ~30s | ~10-15 min | ~45s | Galera SST is slowest single step (multi-GB transfer over VMnet10 backplane) |
+| oltp-patroni  | ~50s | ~12-18 min (projected) | ~50s | etcd raft + Patroni initdb + 2x pg_basebackup ride VMnet10 backplane; HAProxy backend health probe needs ~30s to mark leader UP; +keepalived VRRP unicast convergence (~5s) for VIP bind on MASTER |
 
 **Total ~5-10 min per cluster** (vs ~30 min for the legacy monolithic 14-VM tree). Fresh `packer build` (when a template doesn't exist or needs updating) adds ~8-10 min per template — see §1.1. ISO download shared via `$env:PACKER_CACHE_DIR='H:\VMS\packer_cache'`.
 
@@ -376,3 +434,96 @@ pwsh -File ..\nexus-infra-vmware\scripts\security.ps1 smoke -Phase 0.D.5
 - Iteration loop empirically validated: per-cluster apply for redis was ~5 min, mongo ~5 min, percona ~10 min (vs 30 min monolithic). **Refactor's design hypothesis confirmed**: smaller, bounded blast radius = faster transient discovery + fixing.
 - All transients permanently fixed in source (no `terraform state` surgery, no untracked live edits). Smoke is the regression bar.
 - 0.G.3.5c chunk 2 (delete legacy `packer/oltp-node/` + `terraform/envs/oltp/` + `scripts/oltp.ps1`) is the next + last chunk.
+
+### §3.3 Demo playbooks (Phase 0.G.4)
+
+Per `memory/feedback_demo_discipline.md` every cluster + service + overlay
+ships both a System B JSON demo (under `nexus-cli/docs/demos/`) AND a human-
+readable playbook section here answering: prerequisites · input · expected
+output · where to observe · what it proves.
+
+The 4 demos below mirror the JSON specs at
+`nexus-cli/docs/demos/demo-0.G.4-*.json` and exist to validate Phase 0.G.4
+end-to-end after the smoke gate passes.
+
+#### Demo 1 — `demo-0.G.4-patroni-failover` (Patroni-orchestrated leader switchover)
+
+- **Prerequisites:** 0.G.4 smoke gate ALL GREEN (3 patroni nodes + 3 etcd + 1 haproxy live; cluster shape 1 Leader + 2 Streaming Replica).
+- **Input:**
+  ```pwsh
+  ssh -i ~/.ssh/nexus_gateway_ed25519 nexusadmin@192.168.70.61
+  sudo /usr/local/sbin/nexus-patronictl switchover --master pg-primary --candidate pg-replica-1 --force
+  ```
+- **Expected output (stdout):** `Successfully switched over to "pg-replica-1"` within ~5-10 s.
+- **Where to observe:**
+  - On any patroni node: `sudo /usr/local/sbin/nexus-patronictl list` — `pg-replica-1` now shows `Role=Leader`, `pg-primary` now `Role=Replica`, `pg-replica-2` still `Role=Replica`.
+  - On haproxy-pg: `curl -s -u nexusops:$(sudo cat /etc/nexus-haproxy/haproxy-stats-password) http://127.0.0.1:8404/stats\;csv | awk -F, '$1=="pg_pool"{print $2,$18}'` — `pg-replica-1` line now `UP`, `pg-primary` line transitions to `DOWN` (or shows as a non-leader 503'ing health-check).
+  - In etcd: `sudo /usr/local/sbin/nexus-etcdctl --user "root:$(sudo cat /etc/nexus-etcd/etcd-root-password)" get /service/nexus-pg/leader --print-value-only` — returns `pg-replica-1`.
+- **What it proves:** Patroni's etcd-DCS-driven leader election works end-to-end; HAProxy's `httpchk GET /leader` correctly re-routes :5432 traffic to the new leader without app config change; etcd holds the canonical leader fact.
+
+#### Demo 2 — `demo-0.G.4-patroni-mtls-roundtrip` (mTLS PG connection via HAProxy)
+
+- **Prerequisites:** 0.G.4 smoke ALL GREEN; build host has `/etc/nexus-patroni/postgres-superuser-password` accessible (or replicated to operator workstation).
+- **Input (on pg-primary; uses the leader's local KV-rendered password file). Connects via the VRRP VIP `.60`, not a specific haproxy node's IP — proves the VIP cert IP-SAN works:**
+  ```pwsh
+  ssh -i ~/.ssh/nexus_gateway_ed25519 nexusadmin@192.168.70.61
+  SUPER_PWD=$(sudo cat /etc/nexus-patroni/postgres-superuser-password)
+  PGPASSWORD="$SUPER_PWD" psql \
+    "host=192.168.70.60 port=5432 dbname=postgres user=nexusops sslmode=verify-full sslrootcert=/etc/ssl/certs/patroni-ca.pem" \
+    -c "SELECT version(), current_setting('ssl');"
+  ```
+- **Expected output (stdout):** A row with `PostgreSQL 17.x on ...` and `ssl = on`.
+- **Where to observe:**
+  - On the current leader: `sudo journalctl -u nexus-patroni.service -n 20` shows the new connection accepted via `ssl`.
+  - `sudo -u postgres psql -h /var/run/nexus-patroni -U postgres -d postgres -c "SELECT ssl,version,client_addr FROM pg_stat_ssl JOIN pg_stat_activity USING (pid) WHERE usename='nexusops' LIMIT 5;"` shows `ssl=t version=TLSv1.3` (or 1.2).
+- **What it proves:** End-to-end mTLS path through the HAProxy HA pair via VIP: client validates the server cert chain against the patroni-server CA bundle; the cert's IP-SAN includes the VIP `.60` so `sslmode=verify-full` against the floating IP passes regardless of which haproxy currently holds it; HAProxy proxies the TCP stream transparently; PG validates the connection's TLS termination. The PKI rotation cycle (90 d leaf TTL) covers haproxy-pg-{1,2} + patroni + etcd nodes uniformly.
+
+#### Demo 3 — `demo-0.G.4-haproxy-vip-cutover` (genuine VRRP VIP migration between HAProxy HA pair)
+
+- **Prerequisites:** 0.G.4 smoke ALL GREEN. Confirm `haproxy-pg-1` (`.67`) currently holds the VIP `192.168.70.60`: `ssh nexusadmin@192.168.70.67 ip -4 addr show dev nic0 | grep 192.168.70.60`. Identify the current Patroni leader via `sudo /usr/local/sbin/nexus-patronictl list`.
+- **Input:** kill `nexus-haproxy.service` on the VIP holder; keepalived's health script detects within ~4 s; VIP migrates to `haproxy-pg-2` (`.68`).
+  ```pwsh
+  # Terminal A: continuous read loop via the VIP
+  ssh -i ~/.ssh/nexus_gateway_ed25519 nexusadmin@192.168.70.61
+  SUPER_PWD=$(sudo cat /etc/nexus-patroni/postgres-superuser-password)
+  while true; do
+    PGPASSWORD="$SUPER_PWD" psql \
+      "host=192.168.70.60 port=5432 user=nexusops dbname=postgres sslmode=verify-full sslrootcert=/etc/ssl/certs/patroni-ca.pem" \
+      -tA -c "SELECT now(), inet_server_addr();" 2>&1 | head -1
+    sleep 1
+  done
+
+  # Terminal B: kill HAProxy on the current VIP holder
+  ssh -i ~/.ssh/nexus_gateway_ed25519 nexusadmin@192.168.70.67
+  sudo systemctl stop nexus-haproxy.service
+  ```
+- **Expected output (stdout, terminal A):** A handful of connection-refused errors during the cutover window (~4-8 s while keepalived's `chk_haproxy` script crosses its `fall 3` threshold and the BACKUP node promotes itself); then steady reads resume with `inet_server_addr` continuing to point at the (unchanged) Patroni leader's IP. The VIP migration is transparent at the app TCP layer — clients reconnect to the same `.60:5432` address.
+- **Where to observe:**
+  - On haproxy-pg-2 (`.68`): `ip -4 addr show dev nic0 | grep 192.168.70.60` — VIP now bound here (was on `.67`).
+  - On haproxy-pg-1 (`.67`): `ip -4 addr show dev nic0` — VIP gone; `sudo journalctl -u keepalived.service -n 20` shows `Entering FAULT STATE` then `Stopped track haproxy with status FAILED`.
+  - On haproxy-pg-2 (`.68`): `sudo journalctl -u keepalived.service -n 20` shows `Entering MASTER STATE` + `setting promote_secondaries on interface nic0`.
+  - The TLS handshake against the VIP continues to validate because both haproxy nodes' PKI leaf certs carry the VIP in their IP-SANs (the entire reason for that design).
+- **Recovery:** `ssh nexusadmin@192.168.70.67 sudo systemctl start nexus-haproxy.service`. Within ~6 s (`rise 2` * `interval 2`), keepalived on haproxy-pg-1 re-enters MASTER state and (with preempt ON) takes the VIP back. Some operators prefer `nopreempt` to avoid flap; we keep preempt ON in the lab for visible demonstration.
+- **What it proves:** keepalived unicast VRRP elects a single MASTER across the haproxy HA pair; on MASTER health-script failure, BACKUP promotes within ~4-8 s; the VIP migrates at the kernel L3 layer; apps connecting to the VIP see continuous service across a single-node HAProxy failure. The HA pair eliminates the SPOF that a single HAProxy would have had — the "HA promise" in the phase name covers the LB tier, not just the PG nodes.
+
+#### Demo 4 — `demo-0.G.4-etcd-leader-failover` (etcd raft re-election)
+
+- **Prerequisites:** 0.G.4 smoke ALL GREEN. Identify the etcd leader: `sudo /usr/local/sbin/nexus-etcdctl endpoint status --cluster --write-out=table` — row with `IS LEADER=true`.
+- **Input (on the etcd leader, e.g. etcd-1 at .64):**
+  ```pwsh
+  ssh -i ~/.ssh/nexus_gateway_ed25519 nexusadmin@192.168.70.64
+  sudo systemctl stop nexus-etcd.service
+  ```
+- **Expected output (within ~5 s on any other etcd node):**
+  ```pwsh
+  ssh -i ~/.ssh/nexus_gateway_ed25519 nexusadmin@192.168.70.65
+  sudo /usr/local/sbin/nexus-etcdctl endpoint status --cluster --write-out=table
+  # The 2 surviving members show their endpoint health; one of them is the new IS LEADER=true.
+  # The killed member is reachable=false (or shown as 'request failed').
+  ```
+- **Where to observe:**
+  - `sudo journalctl -u nexus-etcd.service -n 30` on the new leader: `raft: <id> became leader at term N+1`.
+  - On any Patroni node: `sudo /usr/local/sbin/nexus-patronictl list` still shows 1 Leader + 2 Streaming Replica (Patroni's etcd3 client transparently failed over to a surviving etcd endpoint; PG is unaffected).
+  - `sudo /usr/local/sbin/nexus-etcdctl --user "root:$(sudo cat /etc/nexus-etcd/etcd-root-password)" get /service/nexus-pg/leader --print-value-only` still returns the same Patroni leader (no PG-side election fired — etcd re-election is invisible to Patroni's DCS reads).
+- **Recovery:** `ssh nexusadmin@192.168.70.64 sudo systemctl start nexus-etcd.service`. The restarted etcd-1 rejoins the cluster as a follower (`raft: ... became follower at term N+1`).
+- **What it proves:** etcd's raft quorum survives a single-member loss (3/3 → 2/3 still quorate); leader re-election completes within ~5 s (raft election timeout default is 1 s, with ~3-5 s in practice including transit). Patroni's DCS client is endpoint-list-aware and fails over transparently — PG service is uninterrupted. The 3-member etcd quorum is the canonical lab fault tolerance: it tolerates 1 failure; a 5-member quorum would tolerate 2.

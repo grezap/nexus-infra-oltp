@@ -1,0 +1,26 @@
+---
+# oltp-patroni-node -- Ansible playbook (local, run by Packer ansible-local
+# provisioner)
+#
+# Per-engine template per the 0.G.3.5 refactor (memory/feedback_per_cluster_
+# state_per_engine_template.md): ONLY installs PostgreSQL 17 + Patroni 4 +
+# patronictl. etcd lives in oltp-etcd-node; HAProxy in oltp-haproxy-node.
+
+- name: Configure oltp-patroni-node template (Phase 0.G.4)
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+
+  vars:
+    target_user: "{{ target_user | default('nexusadmin') }}"
+    oltp_node_pg_version: "{{ oltp_node_pg_version | default('17') }}"
+    oltp_node_patroni_version: "{{ oltp_node_patroni_version | default('4.0.5') }}"
+
+  roles:
+    - nexus_identity
+    - nexus_network
+    - nexus_firewall
+    - nexus_observability
+    - oltp_firstboot
+    - oltp_patroni

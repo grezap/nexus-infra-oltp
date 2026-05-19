@@ -1,0 +1,18 @@
+---
+- name: Configure oltp-etcd-node template (Phase 0.G.4)
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+
+  vars:
+    target_user: "{{ target_user | default('nexusadmin') }}"
+    oltp_node_etcd_version: "{{ oltp_node_etcd_version | default('3.5.16') }}"
+
+  roles:
+    - nexus_identity
+    - nexus_network
+    - nexus_firewall
+    - nexus_observability
+    - oltp_firstboot
+    - oltp_etcd
