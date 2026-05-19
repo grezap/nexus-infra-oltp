@@ -117,7 +117,14 @@ fi
 if [ -x /usr/local/bin/vault ] && /usr/local/bin/vault version 2>/dev/null | grep -qF "Vault v$vaultVersion"; then
   echo "vault binary v$vaultVersion already installed"
 else
-  cd /tmp
+  # Use /var/tmp instead of /tmp -- the etcd + haproxy nodes are 1 GB RAM
+  # VMs, so tmpfs /tmp is only ~480 MB; the vault binary unzips to ~345 MB
+  # which combined with the ~161 MB zip exceeds tmpfs (transient #4 at
+  # 0.G.4 ratification 2026-05-19). /var/tmp is on / (17 GB free).
+  INSTALL_DIR=/var/tmp/nexus-vault-agent-install
+  rm -rf "`$INSTALL_DIR"
+  mkdir -p "`$INSTALL_DIR"
+  cd "`$INSTALL_DIR"
   zip="vault_$${vaultVersion}_linux_amd64.zip"
   sums="vault_$${vaultVersion}_SHA256SUMS"
   curl -fsSL "https://releases.hashicorp.com/vault/$${vaultVersion}/`$zip"  -o "`$zip"
@@ -125,7 +132,8 @@ else
   grep "`$zip" "`$sums" | sha256sum -c -
   unzip -o "`$zip"
   sudo install -m 755 -o root -g root vault /usr/local/bin/vault
-  rm -f "`$zip" "`$sums" vault
+  cd /
+  rm -rf "`$INSTALL_DIR"
   echo "vault binary v$vaultVersion installed"
 fi
 

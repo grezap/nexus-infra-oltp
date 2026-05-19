@@ -240,7 +240,12 @@ EOT
         $kvErrLines  += "if ! sudo test -s $($t.Dest); then echo '[patroni-tls stage] ERROR: $($t.Dest) not rendered within 20s' >&2; sudo journalctl -u nexus-vault-agent.service --no-pager -n 20 >&2; exit 1; fi"
       }
       $kvDropBody = ($kvDropLines -join "`n")
-      $kvWaitBody = ($kvWaitLines -join " `\\`n     ")
+      # NOTE: do NOT use bash line-continuation here. PS double-quoted `\\
+      # renders as TWO backslashes which bash reads as literal "\" (not
+      # continuation), then newline ends the line, then `&&` is a syntax
+      # error. Just join with a single space -- long line, legal bash.
+      # (Transient #5 at 0.G.4 ratification 2026-05-19.)
+      $kvWaitBody = ($kvWaitLines -join " ")
       $kvErrBody  = ($kvErrLines  -join "`n")
 
       $stage = @"

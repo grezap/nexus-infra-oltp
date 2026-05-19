@@ -39,8 +39,13 @@ locals {
   ])
 
   # client endpoints: service network VMnet11 on :2379 (Patroni dials here).
+  # Use BARE hostnames -- dnsmasq's domain is `nexus.local` (not .nexus.lab),
+  # but bare hostnames resolve via dnsmasq + cert SANs include bare host
+  # form (etcd-1, etcd-2, etcd-3). Caught at 0.G.4 ratification 2026-05-19
+  # transient #7. (.nexus.lab is in allowed_domains for cert issuance but
+  # dnsmasq doesn't actually serve that domain.)
   etcd_client_endpoints = join(",", [
-    for host, m in local.etcd_members_active : "https://${host}.nexus.lab:2379"
+    for host, m in local.etcd_members_active : "https://${host}:2379"
   ])
 }
 
@@ -137,21 +142,31 @@ echo CONFIG_OK
       }
 
       # ─── Stage 2: wait for leader election ─────────────────────────────────
-      Write-Host "[etcd-bootstrap] waiting for leader election..."
-      $deadline = (Get-Date).AddMinutes($timeoutMin)
-      $leader = $null
+      Write-Host "[etcd-bootstrap] waiting for cluster leader election..."
+      $deadline      = (Get-Date).AddMinutes($timeoutMin)
+      $leaderId      = $null
+      $rbacHostIndex = $null
       while ((Get-Date) -lt $deadline) {
-        foreach ($m in $members) {
+        for ($i = 0; $i -lt $members.Count; $i++) {
+          $m = $members[$i]
           $probe = (ssh @sshOpts "$sshUser@$($m.VmIp)" "sudo /usr/local/sbin/nexus-etcdctl endpoint status --write-out=json 2>/dev/null" 2>&1 | Out-String).Trim()
-          if ($probe -match '"isLeader":true') {
-            $leader = $m.Host
+          # etcdctl --write-out=json reports `"leader":<member-id>` (uint64).
+          # Non-zero leader id == cluster has a leader. NB: each etcd node's
+          # /etc/hosts maps its own bare hostname to 127.0.1.1 (firstboot's
+          # resolver-stability entry), so the probe's own-endpoint dial
+          # always fails -- but at least 2/3 of the entries report status.
+          # Any non-zero leader value in any response means the cluster is
+          # quorate. Caught at 0.G.4 ratification 2026-05-19 transient #8.
+          if ($probe -match '"leader":\s*([1-9][0-9]*)') {
+            $leaderId      = $matches[1]
+            $rbacHostIndex = $i
             break
           }
         }
-        if ($leader) { break }
+        if ($leaderId) { break }
         Start-Sleep -Seconds 5
       }
-      if (-not $leader) {
+      if (-not $leaderId) {
         foreach ($m in $members) {
           $j = (ssh @sshOpts "$sshUser@$($m.VmIp)" "sudo journalctl -u nexus-etcd.service --no-pager -n 30" 2>&1 | Out-String)
           Write-Host "--- journal $($m.Host) ---"
@@ -159,13 +174,15 @@ echo CONFIG_OK
         }
         throw "[etcd-bootstrap] no leader elected within $timeoutMin min"
       }
-      Write-Host "[etcd-bootstrap] leader elected: $leader"
+      Write-Host "[etcd-bootstrap] cluster has elected a leader (member_id=$leaderId; observed from $($members[$rbacHostIndex].Host))"
 
       # ─── Stage 3: enable RBAC (root user + auth enable) ─────────────────
       # Idempotent: if `auth enable` was already done, the `auth status` probe
       # returns "Authentication Status: true" + we skip.
+      # RBAC commands go through the raft cluster anyway -- any healthy
+      # member can execute. Use the same node we successfully probed against.
       Write-Host "[etcd-bootstrap] configuring RBAC (root user + auth enable)..."
-      $leaderMember = $members | Where-Object { $_.Host -eq $leader } | Select-Object -First 1
+      $leaderMember = $members[$rbacHostIndex]
       $rbacStage = @'
 set -euo pipefail
 
@@ -177,7 +194,12 @@ if echo "$STATUS" | grep -q "Authentication Status: true"; then
   exit 0
 fi
 
-if [ ! -s /etc/nexus-etcd/etcd-root-password ]; then
+# /etc/nexus-etcd/ is 0750 root:etcd; nexusadmin can't traverse without
+# sudo. `[ ! -s ... ]` would silently report missing because the parent
+# dir isn't traversable, not because the file is absent. Mirror the
+# feedback_sudo_required_for_consul_etc_traverse.md pattern.
+# (Transient #9 at 0.G.4 ratification 2026-05-19.)
+if ! sudo test -s /etc/nexus-etcd/etcd-root-password; then
   echo "[etcd-bootstrap rbac] ERROR: /etc/nexus-etcd/etcd-root-password missing (Vault Agent KV render?)" >&2
   exit 1
 fi

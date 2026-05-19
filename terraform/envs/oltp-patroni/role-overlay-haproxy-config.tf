@@ -113,10 +113,13 @@ backend pg_pool
     option httpchk GET /leader
     # Patroni REST returns 200 only on the leader; 503 on replicas/paused.
     http-check expect status 200
-    # Patroni REST uses HTTPS with the same TLS cert as PG; HAProxy verifies
-    # via the patroni-server CA. The check-ssl option does the TLS handshake
-    # against :8008 over HTTPS.
-    default-server inter 2s fall 3 rise 2 on-marked-down shutdown-sessions check-ssl verify required ca-file /etc/nexus-haproxy/tls/ca.pem
+    # `check` MUST appear on default-server (or each server line) to enable
+    # the httpchk probe. Without it, HAProxy CSV shows status="no check" on
+    # all 3 backends; backend stays perpetually UP without any failover
+    # behavior. (Transient #16 at 0.G.4 ratification 2026-05-19.)
+    # `check-ssl` does the TLS handshake against :8008 over HTTPS using the
+    # patroni-server CA bundle for verify.
+    default-server check inter 2s fall 3 rise 2 on-marked-down shutdown-sessions check-ssl verify required ca-file /etc/nexus-haproxy/tls/ca.pem
     server pg-primary   192.168.70.61:5432 port 8008
     server pg-replica-1 192.168.70.62:5432 port 8008
     server pg-replica-2 192.168.70.63:5432 port 8008
@@ -126,7 +129,9 @@ backend pg_pool
 
       $stage = @"
 set -euo pipefail
-if [ ! -s /etc/nexus-haproxy/haproxy-stats-password ]; then
+# /etc/nexus-haproxy is 0750 root:haproxy -- nexusadmin can't traverse
+# without sudo. Same class as transient #9 (etcd-bootstrap).
+if ! sudo test -s /etc/nexus-haproxy/haproxy-stats-password; then
   echo '[haproxy-config] ERROR: /etc/nexus-haproxy/haproxy-stats-password missing (Vault Agent KV render?)' >&2
   exit 1
 fi
@@ -134,6 +139,10 @@ STATS_PWD=`$(sudo cat /etc/nexus-haproxy/haproxy-stats-password)
 TMP=`$(mktemp)
 echo '$configB64' | base64 -d > "`$TMP"
 sed -i "s/__HAPROXY_STATS_PASSWORD__/`$STATS_PWD/" "`$TMP"
+# HAProxy 3 requires LF on last line; PS here-string strips trailing LF
+# before closing '@. Ensure-newline via `sed -i -e '$a\\'`.
+# (Transient #14 at 0.G.4 ratification 2026-05-19, mirrors 0.G.3 #10.)
+sed -i -e '`$a\' "`$TMP"
 sudo install -m 0640 -o root -g haproxy "`$TMP" /etc/nexus-haproxy/haproxy.cfg
 rm -f "`$TMP"
 

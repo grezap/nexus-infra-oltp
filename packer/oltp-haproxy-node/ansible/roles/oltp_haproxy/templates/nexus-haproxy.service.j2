@@ -10,8 +10,13 @@ StartLimitIntervalSec=600
 
 [Service]
 Type=notify
-User={{ oltp_node_haproxy_user }}
-Group={{ oltp_node_haproxy_group }}
+# NOTE: do NOT set User=/Group= here. HAProxy needs CAP_SYS_CHROOT to call
+# chroot() (specified by `chroot /var/lib/haproxy` in haproxy.cfg). Starting
+# as root + dropping to {{ oltp_node_haproxy_user }} via haproxy.cfg's
+# `global { user; group }` is the canonical pattern (mirrors apt-shipped
+# haproxy.service). User=/Group= at the systemd level dropped CAP_SYS_CHROOT
+# and chroot() failed with "Cannot chroot(/var/lib/haproxy)" (Transient #15
+# at 0.G.4 ratification 2026-05-19).
 EnvironmentFile=-/etc/default/nexus-haproxy
 ExecStartPre=/usr/sbin/haproxy -c -f {{ oltp_node_haproxy_config_dir }}/haproxy.cfg
 ExecStart=/usr/sbin/haproxy -Ws -f {{ oltp_node_haproxy_config_dir }}/haproxy.cfg -p /run/nexus-haproxy/haproxy.pid

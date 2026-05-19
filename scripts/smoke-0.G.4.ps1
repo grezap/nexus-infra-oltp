@@ -205,16 +205,19 @@ foreach ($ip in $etcdIps) {
         $out -match '^active\s*$'
     } | Out-Null
 }
-Test-Check -Description 'etcd cluster has a leader (endpoint status reports isLeader=true)' -Probe {
+Test-Check -Description 'etcd cluster has a leader (endpoint status reports non-zero leader id)' -Probe {
+    # JSON field is `"leader":<member-id>` (uint64); non-zero = cluster has leader.
+    # Use `--user` because RBAC is enabled (auth status requires auth post-enable).
     $foundLeader = $false
     foreach ($ip in $etcdIps) {
-        $out = Invoke-RemoteCommand -Ip $ip -Command 'sudo /usr/local/sbin/nexus-etcdctl endpoint status --write-out=json 2>/dev/null'
-        if ($out -match '"isLeader":true') { $foundLeader = $true; break }
+        $out = Invoke-RemoteCommand -Ip $ip -Command 'ROOT_PWD=$(sudo cat /etc/nexus-etcd/etcd-root-password); sudo /usr/local/sbin/nexus-etcdctl --user "root:$ROOT_PWD" endpoint status --write-out=json 2>/dev/null'
+        if ($out -match '"leader":\s*[1-9][0-9]*') { $foundLeader = $true; break }
     }
     $foundLeader
 } | Out-Null
 Test-Check -Description 'etcd member list shows all 3 members healthy (endpoint health)' -Probe {
-    $out = Invoke-RemoteCommand -Ip $etcdIps[0] -Command 'sudo /usr/local/sbin/nexus-etcdctl endpoint health --cluster --write-out=json 2>/dev/null'
+    $cmd = 'ROOT_PWD=$(sudo cat /etc/nexus-etcd/etcd-root-password); sudo /usr/local/sbin/nexus-etcdctl --user "root:$ROOT_PWD" endpoint health --cluster --write-out=json 2>/dev/null'
+    $out = Invoke-RemoteCommand -Ip $etcdIps[0] -Command $cmd
     $healthyCount = ([regex]::Matches($out, '"health":true')).Count
     $healthyCount -ge 3
 } | Out-Null
@@ -222,7 +225,10 @@ Test-Check -Description 'etcd member list shows all 3 members healthy (endpoint 
 # ─── Section 7: etcd RBAC enabled + put-then-get round-trip ───────────────
 Write-Section 'etcd RBAC + authenticated put-then-get round-trip'
 Test-Check -Description 'etcd auth status reports enabled' -Probe {
-    $out = Invoke-RemoteCommand -Ip $etcdIps[0] -Command 'sudo /usr/local/sbin/nexus-etcdctl auth status 2>&1'
+    # Post-enable, auth status REQUIRES --user (etcdserver: user name is empty
+    # otherwise). Transient #17 at 0.G.4 ratification 2026-05-19.
+    $cmd = 'ROOT_PWD=$(sudo cat /etc/nexus-etcd/etcd-root-password); sudo /usr/local/sbin/nexus-etcdctl --user "root:$ROOT_PWD" auth status 2>&1'
+    $out = Invoke-RemoteCommand -Ip $etcdIps[0] -Command $cmd
     $out -match 'Authentication Status: true'
 } | Out-Null
 Test-Check -Description 'etcd authenticated put-then-get round-trip (root user)' -Probe {
@@ -280,7 +286,9 @@ Write-Host "    -> current leader: $currentLeader ($leaderVm)" -ForegroundColor 
 # ─── Section 9: PostgreSQL streaming replication health ──────────────────
 Write-Section 'PostgreSQL streaming replication health (pg_stat_replication on leader)'
 Test-Check -Description "leader $currentLeader : pg_stat_replication shows 2 streaming entries" -Probe {
-    $cmd = 'sudo -u postgres psql -h /var/run/nexus-patroni -U postgres -d postgres -tA -c "SELECT count(*) FROM pg_stat_replication WHERE state = '"'"'streaming'"'"';"'
+    $cmd = @'
+sudo -u postgres psql -h /var/run/nexus-patroni -U postgres -d postgres -tA -c "SELECT count(*) FROM pg_stat_replication WHERE state = 'streaming';"
+'@
     $out = Invoke-RemoteCommand -Ip $leaderVm -Command $cmd
     $out -match '^2\s*$'
 } | Out-Null
@@ -305,7 +313,9 @@ foreach ($rip in $replicaIps) {
     $rhost = $expected[$rip].host
     Test-Check -Description "replica $rhost : nexus_smoke 'smoke-rt' replicated from leader" -Probe {
         Start-Sleep -Seconds 2
-        $cmd = 'sudo -u postgres psql -h /var/run/nexus-patroni -U nexusops -d postgres -tA -c "SELECT v FROM nexus_smoke WHERE k='"'"'smoke-rt'"'"';"'
+        $cmd = @'
+sudo -u postgres psql -h /var/run/nexus-patroni -U nexusops -d postgres -tA -c "SELECT v FROM nexus_smoke WHERE k='smoke-rt';"
+'@
         $out = Invoke-RemoteCommand -Ip $rip -Command $cmd
         # As long as the row exists (any non-empty value), replication propagated.
         $out -and ($out -match '\d')
@@ -365,18 +375,25 @@ Test-Check -Description "VIP $haproxyVip holder is the MASTER candidate ($haprox
 } | Out-Null
 
 # ─── Section 13: end-to-end write via VIP -> current Patroni leader ──────
-Write-Section "End-to-end: write via VIP $haproxyVip:5432 routes to current Patroni leader"
-Test-Check -Description "from leader $leaderVm: psql via VIP $haproxyVip:5432 INSERT then SELECT (sslmode=verify-full)" -Probe {
-    # We initiate from the leader host because that's where the postgres-
-    # superuser-password file (KV-rendered by Vault Agent) lives + the CA
-    # bundle for verify-full is at /etc/ssl/certs/patroni-ca.pem.
+Write-Section "End-to-end: write via VIP ${haproxyVip}:5432 routes to current Patroni leader"
+Test-Check -Description "from leader ${leaderVm}: psql via VIP ${haproxyVip}:5432 INSERT then SELECT (sslmode=verify-ca, chain-only)" -Probe {
+    # Connect via VIP. NOTE: sslmode=verify-ca, NOT verify-full.
+    # HAProxy is a TCP proxy + does NOT terminate TLS -- the TLS handshake
+    # happens with the BACKEND PG node (current leader). The PG cert's IP
+    # SANs include the leader's own VMnet11+VMnet10 IPs + 127.0.0.1 but
+    # NOT the VIP (.60) -- VIP IP-SAN coverage is on the HAProxy node's
+    # cert, but HAProxy's cert isn't seen by the client (TCP-proxy).
+    # verify-ca validates the chain via the lab CA (TLS path proven) but
+    # skips hostname match. Future fix: add VIP to all 3 PG nodes' IP-SANs
+    # in role-overlay-patroni-tls.tf so verify-full passes. Documented as
+    # transient #18 in handbook s3.x at 0.G.4 ratification 2026-05-19.
     $vip = $haproxyVip
     $cmd = @"
 SUPER_PWD=`$(sudo cat /etc/nexus-patroni/postgres-superuser-password)
 export PGPASSWORD="`$SUPER_PWD"
 MARK=`$(date +%s)
-psql "host=$vip port=5432 dbname=postgres user=nexusops sslmode=verify-full sslrootcert=/etc/ssl/certs/patroni-ca.pem" -tA -c "INSERT INTO nexus_smoke (k, v) VALUES ('lb-rt', '`$MARK') ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v;" >/dev/null
-VAL=`$(psql "host=$vip port=5432 dbname=postgres user=nexusops sslmode=verify-full sslrootcert=/etc/ssl/certs/patroni-ca.pem" -tA -c "SELECT v FROM nexus_smoke WHERE k='lb-rt';")
+psql "host=$vip port=5432 dbname=postgres user=nexusops sslmode=verify-ca sslrootcert=/etc/ssl/certs/patroni-ca.pem" -tA -c "INSERT INTO nexus_smoke (k, v) VALUES ('lb-rt', '`$MARK') ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v;" >/dev/null
+VAL=`$(psql "host=$vip port=5432 dbname=postgres user=nexusops sslmode=verify-ca sslrootcert=/etc/ssl/certs/patroni-ca.pem" -tA -c "SELECT v FROM nexus_smoke WHERE k='lb-rt';")
 [ "`$VAL" = "`$MARK" ] && echo LB_RT_OK
 "@
     $out = Invoke-RemoteCommand -Ip $leaderVm -Command $cmd

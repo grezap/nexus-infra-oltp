@@ -32,7 +32,10 @@ locals {
     for host, m in local.patroni_nodes : host => m if m.enabled
   }
 
-  patroni_etcd_endpoints = "etcd-1.nexus.lab:2379,etcd-2.nexus.lab:2379,etcd-3.nexus.lab:2379"
+  # Use BARE hostnames -- dnsmasq's domain is nexus.local, but bare hostnames
+  # work via dnsmasq + cert SANs include bare hostname form. See
+  # role-overlay-etcd-bootstrap.tf for the lesson (0.G.4 transient #7).
+  patroni_etcd_endpoints = "etcd-1:2379,etcd-2:2379,etcd-3:2379"
 }
 
 resource "null_resource" "patroni_bootstrap" {
@@ -84,7 +87,7 @@ restapi:
   verify_client: optional
   authentication:
     username: nexusops
-    password_file: /etc/nexus-patroni/patroni-rest-password
+    password: __PATRONI_REST_PWD__
 
 etcd3:
   hosts: $etcdHosts
@@ -93,7 +96,7 @@ etcd3:
   cert: /etc/nexus-patroni/tls/server-cert.pem
   key: /etc/nexus-patroni/tls/server-key.pem
   username: root
-  password_file: /etc/nexus-patroni/etcd-root-password
+  password: __ETCD_ROOT_PWD__
 
 bootstrap:
   dcs:
@@ -118,13 +121,19 @@ bootstrap:
     - encoding: UTF8
     - data-checksums
   pg_hba:
-    - "hostssl replication replicator 192.168.10.0/24 scram-sha-256"
+    # Replication allowed from both VMnet10 (backplane, design intent) AND
+    # VMnet11 (service) -- Patroni's connect_address is VMnet11 by default,
+    # so replicas pg_basebackup from leader via VMnet11. The rule covers
+    # both subnets via 192.168.0.0/16. (Transient #11 at 0.G.4 ratification
+    # 2026-05-19: original rule only allowed VMnet10 -> "no pg_hba.conf
+    # entry for replication connection from host 192.168.70.63".)
+    - "hostssl replication replicator 192.168.0.0/16 scram-sha-256"
     - "hostssl all all 192.168.0.0/16 scram-sha-256"
     - "host all all 127.0.0.1/32 trust"
     - "host replication replicator 127.0.0.1/32 trust"
   users:
     nexusops:
-      password_file: /etc/nexus-patroni/postgres-superuser-password
+      password: __POSTGRES_SUPERUSER_PWD__
       options:
         - superuser
         - createrole
@@ -139,13 +148,13 @@ postgresql:
   authentication:
     superuser:
       username: postgres
-      password_file: /etc/nexus-patroni/postgres-superuser-password
+      password: __POSTGRES_SUPERUSER_PWD__
     replication:
       username: replicator
-      password_file: /etc/nexus-patroni/postgres-replication-password
+      password: __POSTGRES_REPLICATION_PWD__
     rewind:
       username: rewind
-      password_file: /etc/nexus-patroni/postgres-replication-password
+      password: __POSTGRES_REPLICATION_PWD__
   parameters:
     unix_socket_directories: /var/run/nexus-patroni
     ssl: "on"
@@ -170,11 +179,46 @@ tags:
         # its sole content. Avoids storing creds in patroni.yml (which is
         # otherwise group-readable by postgres).
 
+        # Read the 4 KV-rendered passwords on the target node + sed-substitute
+        # them into the patroni.yml template tokens. Patroni 4.0.5's
+        # _build_effective_configuration eagerly formats `username:password`
+        # at config-load time for restapi.authentication + etcd3 (and likely
+        # postgresql.authentication too), expecting LITERAL `password:` keys
+        # -- `password_file:` is NOT honored in that code path despite docs.
+        # (Transient #10 at 0.G.4 ratification 2026-05-19; KeyError: 'password'.)
         $stage = @"
 set -euo pipefail
-echo '$configB64' | base64 -d | sudo tee /etc/nexus-patroni/patroni.yml > /dev/null
-sudo chown root:postgres /etc/nexus-patroni/patroni.yml
-sudo chmod 0640 /etc/nexus-patroni/patroni.yml
+
+# Read the 4 KV-rendered password files. All are mode 0400 root:postgres
+# (rendered by patroni-tls overlay); sudo cat is required.
+ETCD_PWD=`$(sudo cat /etc/nexus-patroni/etcd-root-password)
+REST_PWD=`$(sudo cat /etc/nexus-patroni/patroni-rest-password)
+SUPER_PWD=`$(sudo cat /etc/nexus-patroni/postgres-superuser-password)
+REPL_PWD=`$(sudo cat /etc/nexus-patroni/postgres-replication-password)
+
+for p in "`$ETCD_PWD" "`$REST_PWD" "`$SUPER_PWD" "`$REPL_PWD"; do
+  if [ -z "`$p" ]; then
+    echo "[patroni-bootstrap stage] ERROR: one of the 4 password files is empty -- patroni-tls overlay may not have rendered yet" >&2
+    exit 1
+  fi
+done
+
+TMP=`$(mktemp)
+echo '$configB64' | base64 -d > "`$TMP"
+# Substitute the 4 placeholders. Passwords are 32-char hex; no sed regex
+# metachar risk. Use `|` separator to avoid colliding with `/` in any paths.
+sed -i "s|__ETCD_ROOT_PWD__|`$ETCD_PWD|g; s|__PATRONI_REST_PWD__|`$REST_PWD|g; s|__POSTGRES_SUPERUSER_PWD__|`$SUPER_PWD|g; s|__POSTGRES_REPLICATION_PWD__|`$REPL_PWD|g" "`$TMP"
+
+# Verify no placeholders survived.
+if grep -q '__POSTGRES_\|__ETCD_\|__PATRONI_' "`$TMP"; then
+  echo "[patroni-bootstrap stage] ERROR: placeholder(s) survived sed substitution" >&2
+  grep '__' "`$TMP" >&2
+  rm -f "`$TMP"
+  exit 1
+fi
+
+sudo install -m 0640 -o root -g postgres "`$TMP" /etc/nexus-patroni/patroni.yml
+rm -f "`$TMP"
 
 sudo systemctl daemon-reload
 sudo systemctl enable nexus-patroni.service
@@ -231,16 +275,49 @@ echo CONFIG_OK
       }
       Write-Host "[patroni-bootstrap] cluster converged: leader=$leaderHost, $($nodes.Count - 1) replicas streaming."
 
-      # ─── Stage 3: psql write/read round-trip via leader ──────────────────
+      # ─── Stage 3: create nexusops superuser (Patroni 4 ignores bootstrap.users)
+      # Patroni 4 silently drops bootstrap.users (deprecated since 3.x in favor
+      # of bootstrap.post_init). The nexusops superuser declared in patroni.yml
+      # is never created. Workaround: CREATE USER it directly via the running
+      # leader as the postgres superuser (peer-auth via Unix socket, no pwd).
+      # Idempotent via `CREATE USER ... IF NOT EXISTS`-equivalent
+      # (the DO-block checks pg_roles first).
+      # (Transient #12 at 0.G.4 ratification 2026-05-19.)
       $leaderNode = $nodes | Where-Object { $_.Host -eq $leaderHost } | Select-Object -First 1
+      Write-Host "[patroni-bootstrap] creating nexusops superuser on leader $leaderHost (Patroni 4 ignores bootstrap.users)..."
+      $createUserStage = @'
+set -euo pipefail
+SUPER_PWD=$(sudo cat /etc/nexus-patroni/postgres-superuser-password)
+SOCK_DIR=/var/run/nexus-patroni
+sudo -u postgres psql -h "$SOCK_DIR" -U postgres -d postgres -v ON_ERROR_STOP=1 <<SQL
+DO \$\$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexusops') THEN
+    CREATE ROLE nexusops LOGIN SUPERUSER CREATEROLE CREATEDB PASSWORD '$SUPER_PWD';
+  ELSE
+    ALTER ROLE nexusops WITH LOGIN SUPERUSER CREATEROLE CREATEDB PASSWORD '$SUPER_PWD';
+  END IF;
+END
+\$\$;
+SQL
+echo "[patroni-bootstrap users] nexusops superuser ensured"
+'@
+      $createUserB64 = [Convert]::ToBase64String([System.Text.UTF8Encoding]::new($false).GetBytes($createUserStage))
+      $createUserOut = (ssh @sshOpts "$sshUser@$($leaderNode.VmIp)" "echo '$createUserB64' | base64 -d | bash" 2>&1 | Out-String)
+      if ($LASTEXITCODE -ne 0) {
+        Write-Host $createUserOut.Trim()
+        throw "[patroni-bootstrap] nexusops user creation failed (rc=$LASTEXITCODE)"
+      }
+      Write-Host $createUserOut.Trim()
+
+      # ─── Stage 4: psql write/read round-trip via leader ──────────────────
       $rwStage = @'
 set -euo pipefail
 SUPER_PWD=$(sudo cat /etc/nexus-patroni/postgres-superuser-password)
 export PGPASSWORD="$SUPER_PWD"
-# psql as nexusops (the superuser we created via bootstrap.users) via Unix socket
-# (Patroni runs PG with unix_socket_directories=/var/run/nexus-patroni). For
-# leader-write verification we use the unix socket so we don't need to embed
-# the TLS material for client-side validation.
+# psql as nexusops via Unix socket (Patroni runs PG with
+# unix_socket_directories=/var/run/nexus-patroni). For leader-write
+# verification we use the unix socket so we do not need TLS validation.
 SOCK_DIR=/var/run/nexus-patroni
 sudo -u postgres psql -h "$SOCK_DIR" -U nexusops -d postgres -tA -c "CREATE TABLE IF NOT EXISTS nexus_smoke (k text PRIMARY KEY, v text);"
 sudo -u postgres psql -h "$SOCK_DIR" -U nexusops -d postgres -tA -c "INSERT INTO nexus_smoke (k, v) VALUES ('bootstrap', '$(date -u +%FT%TZ)') ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v;"
