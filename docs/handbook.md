@@ -458,7 +458,12 @@ end-to-end after the smoke gate passes.
 - **Where to observe:**
   - On any patroni node: `sudo /usr/local/sbin/nexus-patronictl list` — `pg-replica-1` now shows `Role=Leader`, `pg-primary` now `Role=Replica`, `pg-replica-2` still `Role=Replica`.
   - On haproxy-pg: `curl -s -u nexusops:$(sudo cat /etc/nexus-haproxy/haproxy-stats-password) http://127.0.0.1:8404/stats\;csv | awk -F, '$1=="pg_pool"{print $2,$18}'` — `pg-replica-1` line now `UP`, `pg-primary` line transitions to `DOWN` (or shows as a non-leader 503'ing health-check).
-  - In etcd: `sudo /usr/local/sbin/nexus-etcdctl --user "root:$(sudo cat /etc/nexus-etcd/etcd-root-password)" get /service/nexus-pg/leader --print-value-only` — returns `pg-replica-1`.
+  - In etcd: first capture the password into a shell variable, then call etcdctl with `$ROOT_PWD`:
+    ```bash
+    ROOT_PWD=$(sudo cat /etc/nexus-etcd/etcd-root-password)
+    sudo /usr/local/sbin/nexus-etcdctl --user "root:$ROOT_PWD" get /service/nexus-pg/leader --print-value-only
+    ```
+    returns `pg-replica-1`.
 - **What it proves:** Patroni's etcd-DCS-driven leader election works end-to-end; HAProxy's `httpchk GET /leader` correctly re-routes :5432 traffic to the new leader without app config change; etcd holds the canonical leader fact.
 
 #### Demo 2 — `demo-0.G.4-patroni-mtls-roundtrip` (mTLS PG connection via HAProxy)
@@ -524,6 +529,11 @@ end-to-end after the smoke gate passes.
 - **Where to observe:**
   - `sudo journalctl -u nexus-etcd.service -n 30` on the new leader: `raft: <id> became leader at term N+1`.
   - On any Patroni node: `sudo /usr/local/sbin/nexus-patronictl list` still shows 1 Leader + 2 Streaming Replica (Patroni's etcd3 client transparently failed over to a surviving etcd endpoint; PG is unaffected).
-  - `sudo /usr/local/sbin/nexus-etcdctl --user "root:$(sudo cat /etc/nexus-etcd/etcd-root-password)" get /service/nexus-pg/leader --print-value-only` still returns the same Patroni leader (no PG-side election fired — etcd re-election is invisible to Patroni's DCS reads).
+  - First capture the password into `$ROOT_PWD`, then query etcd:
+    ```bash
+    ROOT_PWD=$(sudo cat /etc/nexus-etcd/etcd-root-password)
+    sudo /usr/local/sbin/nexus-etcdctl --user "root:$ROOT_PWD" get /service/nexus-pg/leader --print-value-only
+    ```
+    still returns the same Patroni leader (no PG-side election fired — etcd re-election is invisible to Patroni's DCS reads).
 - **Recovery:** `ssh nexusadmin@192.168.70.64 sudo systemctl start nexus-etcd.service`. The restarted etcd-1 rejoins the cluster as a follower (`raft: ... became follower at term N+1`).
 - **What it proves:** etcd's raft quorum survives a single-member loss (3/3 → 2/3 still quorate); leader re-election completes within ~5 s (raft election timeout default is 1 s, with ~3-5 s in practice including transit). Patroni's DCS client is endpoint-list-aware and fails over transparently — PG service is uninterrupted. The 3-member etcd quorum is the canonical lab fault tolerance: it tolerates 1 failure; a 5-member quorum would tolerate 2.
