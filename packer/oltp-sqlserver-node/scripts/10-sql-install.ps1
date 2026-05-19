@@ -1,0 +1,162 @@
+# 10-sql-install.ps1 -- SQL Server 2022 Developer Edition silent install.
+#
+# Inputs (environment vars, set by Packer's powershell provisioner):
+#   NEXUS_SQL_VERSION   = '2022'  (informational; not actually used by
+#                                  setup.exe since the binaries are version-
+#                                  specific anyway)
+#   NEXUS_SQL_EDITION   = 'Developer'
+#   NEXUS_SQL_FEATURES  = 'SQLEngine,FullText'
+#   NEXUS_SQL_INSTANCE  = 'MSSQLSERVER'
+#   NEXUS_ISO_PATH      = 'C:\Windows\Temp\sqlserver.iso'  (uploaded by Packer
+#                                                          file provisioner)
+#
+# Why silent (/Q) over passive (/QS): /QS shows a progress dialog, which
+# Packer's powershell provisioner can't dismiss. /Q is fully unattended
+# (logs only).
+#
+# Why /ACTION=Install (vs InstallFailoverCluster): at bake time we install
+# a STANDALONE SQL instance on every node. The FCI pair (sql-fci-1/2) gets
+# their instance re-configured as FCI at terraform apply time by
+# role-overlay-fci-install.tf, which re-runs setup.exe with /ACTION=
+# InstallFailoverCluster pointing at the iSCSI cluster shared volume. The
+# AG-replica nodes (sql-ag-rep-1/2) keep the standalone install + just
+# join the AG.
+#
+# Service account at bake time: NT AUTHORITY\NETWORK SERVICE (local).
+# Terraform apply later flips this to nexus.lab\gmsa-sql-engine$ after the
+# nodes domain-join + are added to nexus-sql-cluster-members (per the GMSA
+# overlay).
+#
+# Authentication mode at bake time: Mixed (Windows + SQL). Why mixed:
+# AG endpoint certificate-based auth (ADR-0027) doesn't itself need mixed
+# mode, but the emergency `sa` access path requires SQL auth enabled. The
+# `sa` login is created with the KV-seeded password at terraform-apply
+# time via T-SQL, NOT at bake time -- /SECURITYMODE=SQL only enables the
+# mode; the actual `sa` password is set later.
+
+$ErrorActionPreference = 'Stop'
+
+$sqlEdition  = $env:NEXUS_SQL_EDITION
+$sqlFeatures = $env:NEXUS_SQL_FEATURES
+$sqlInstance = $env:NEXUS_SQL_INSTANCE
+$isoPath     = $env:NEXUS_ISO_PATH
+
+if (-not $sqlEdition)  { throw 'NEXUS_SQL_EDITION env var missing' }
+if (-not $sqlFeatures) { throw 'NEXUS_SQL_FEATURES env var missing' }
+if (-not $sqlInstance) { throw 'NEXUS_SQL_INSTANCE env var missing' }
+if (-not $isoPath)     { throw 'NEXUS_ISO_PATH env var missing' }
+if (-not (Test-Path $isoPath)) { throw "SQL ISO not at $isoPath (Packer file provisioner failed?)" }
+
+Write-Host "=== 10-sql-install: mounting $isoPath ==="
+
+# Mount the ISO as a virtual CD-ROM. PowerShell's Mount-DiskImage is
+# idempotent -- if already mounted it returns the existing image. The
+# drive letter assignment is automatic; we pick it up via Get-Volume.
+$image = Mount-DiskImage -ImagePath $isoPath -PassThru
+$volume = ($image | Get-Volume)
+$driveLetter = $volume.DriveLetter
+if (-not $driveLetter) {
+    # Race: Get-Volume sometimes returns null on a fresh mount. Wait + retry.
+    Start-Sleep -Seconds 5
+    $volume = (Get-DiskImage -ImagePath $isoPath | Get-Volume)
+    $driveLetter = $volume.DriveLetter
+}
+if (-not $driveLetter) { throw "Failed to assign drive letter to mounted ISO at $isoPath" }
+$setupExe = "${driveLetter}:\setup.exe"
+if (-not (Test-Path $setupExe)) { throw "setup.exe not found at $setupExe (ISO content unexpected)" }
+
+Write-Host "=== 10-sql-install: ISO mounted at ${driveLetter}: ; setup.exe at $setupExe ==="
+
+# setup.exe arguments per
+# https://learn.microsoft.com/en-us/sql/database-engine/install-windows/install-sql-server-from-the-command-prompt
+# /TCPENABLED=1 -- canonical for remote SQL clients (the Listener at
+#     .70.17 + the FCI virtual server at .70.16 + the AG replica clients
+#     all connect via 1433/TCP).
+# /NPENABLED=0 -- named pipes off (legacy; nothing in NexusPlatform uses them).
+# /SQLSVCACCOUNT="NT AUTHORITY\NETWORK SERVICE" -- bake-time identity;
+#     terraform changes this to gmsa-sql-engine after domain-join.
+# /SQLSYSADMINACCOUNTS="BUILTIN\Administrators" -- bake-time admin
+#     allowlist; terraform adds nexus.lab\Domain Admins + the AG-specific
+#     service principals after domain-join.
+# /SECURITYMODE=SQL -- mixed mode (Windows + SQL auth). Required so the
+#     `sa` login can be enabled later by terraform for emergency operator
+#     access. /SAPWD is the bake-time placeholder; terraform OVERWRITES
+#     this immediately via T-SQL after the node first boots, with the
+#     KV-seeded sa-password.
+# /UPDATEENABLED=0 -- don't pull CU/SP updates during bake (deterministic
+#     image; CUs applied post-bake as a separate step if needed).
+# /IACCEPTSQLSERVERLICENSETERMS -- silent EULA accept.
+# /SQLCOLLATION=SQL_Latin1_General_CP1_CI_AS -- canonical SQL Server
+#     default (case-insensitive, accent-sensitive). Portfolio demos don't
+#     need a different collation; this matches what most SSMS-clicked
+#     installs land on.
+
+$bakePlaceholderSaPwd = 'NexusBake_OnlyForInstall_RotatedByTerraform_2026'
+
+$setupArgs = @(
+    "/Q"
+    "/ACTION=Install"
+    "/FEATURES=$sqlFeatures"
+    "/INSTANCENAME=$sqlInstance"
+    "/SQLSVCACCOUNT=`"NT AUTHORITY\NETWORK SERVICE`""
+    "/SQLSYSADMINACCOUNTS=`"BUILTIN\Administrators`""
+    "/SECURITYMODE=SQL"
+    "/SAPWD=`"$bakePlaceholderSaPwd`""
+    "/TCPENABLED=1"
+    "/NPENABLED=0"
+    "/UPDATEENABLED=0"
+    "/SQLCOLLATION=SQL_Latin1_General_CP1_CI_AS"
+    "/IACCEPTSQLSERVERLICENSETERMS"
+) -join ' '
+
+Write-Host "=== 10-sql-install: launching setup.exe (silent, ~18 min) ==="
+Write-Host "    Edition: $sqlEdition"
+Write-Host "    Features: $sqlFeatures"
+Write-Host "    Instance: $sqlInstance"
+Write-Host "    (Logs land at C:\Program Files\Microsoft SQL Server\160\Setup Bootstrap\Log\)"
+
+$proc = Start-Process -FilePath $setupExe -ArgumentList $setupArgs `
+    -Wait -PassThru -NoNewWindow
+$exitCode = $proc.ExitCode
+
+# 0 = success; 3010 = success but reboot required (Windows feature
+# install + WMI provider). Treat 3010 as success here -- the next stage
+# (11-cluster-features.ps1) is followed by a windows-restart provisioner
+# anyway.
+if ($exitCode -ne 0 -and $exitCode -ne 3010) {
+    # Try to surface the most recent setup log path for debugging.
+    $logRoot = 'C:\Program Files\Microsoft SQL Server\160\Setup Bootstrap\Log'
+    if (Test-Path $logRoot) {
+        $latest = Get-ChildItem $logRoot -Directory | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        Write-Host "ERROR: setup.exe exited $exitCode -- latest log dir: $($latest.FullName)"
+        $summary = Join-Path $latest.FullName 'Summary.txt'
+        if (Test-Path $summary) {
+            Write-Host "--- Summary.txt (head -50) ---"
+            Get-Content $summary -TotalCount 50 | Write-Host
+        }
+    }
+    throw "SQL Server setup.exe failed (exit=$exitCode). See logs above."
+}
+
+Write-Host "=== 10-sql-install: setup.exe completed (exit=$exitCode) ==="
+
+# Dismount the ISO (frees the drive letter; the ISO file itself is
+# deleted by the final cleanup stage in oltp-sqlserver-node.pkr.hcl).
+Dismount-DiskImage -ImagePath $isoPath | Out-Null
+
+# Verify the engine actually responds. sqlcmd is on PATH after install.
+# -E uses Windows auth (Local Administrator is in the BUILTIN\Administrators
+# sysadmin role per the /SQLSYSADMINACCOUNTS arg above).
+$null = & sqlcmd -E -S "localhost\$sqlInstance" -Q "SELECT @@VERSION" -h -1 -W 2>&1
+if ($LASTEXITCODE -ne 0) {
+    # First-install sometimes needs a few seconds for the service to fully
+    # initialize even after Start-Service returns. Retry once after 10s.
+    Start-Sleep -Seconds 10
+    $verOut = & sqlcmd -E -S "localhost\$sqlInstance" -Q "SELECT @@VERSION" -h -1 -W 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "sqlcmd against MSSQLSERVER failed (exit=$LASTEXITCODE). Output: $verOut"
+    }
+}
+
+$verOut = & sqlcmd -E -S "localhost\$sqlInstance" -Q "SELECT CONCAT(SERVERPROPERTY('ProductVersion'),' ',SERVERPROPERTY('Edition'))" -h -1 -W
+Write-Host "=== 10-sql-install: engine reachable -- $verOut ==="

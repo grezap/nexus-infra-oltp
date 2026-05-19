@@ -1,10 +1,11 @@
 # nexus-infra-oltp operator handbook
 
-> **Status (Phase 0.G.1 + 0.G.2 + 0.G.3 + 0.G.3.5 + 0.G.4):** ✅ all four
-> OLTP cluster sub-phases shipped per-cluster + per-engine. 0.G.1+0.G.2+
-> 0.G.3+0.G.3.5 **PROVEN cold-rebuildable (2026-05-18)**; 0.G.4 (Patroni
-> + etcd + HAProxy) scaffolded 2026-05-19 — ready to apply via the same
-> per-cluster wrapper pattern, ratification pending:
+> **Status (Phase 0.G.1 + 0.G.2 + 0.G.3 + 0.G.3.5 + 0.G.4 + 0.G.7):** ✅ all
+> five OLTP cluster sub-phases shipped per-cluster + per-engine.
+> 0.G.1+0.G.2+0.G.3+0.G.3.5 **PROVEN cold-rebuildable (2026-05-18)**; 0.G.4
+> (Patroni + etcd + HAProxy) closed 2026-05-19; **0.G.7 (SQL Server FCI +
+> Always On AG on Windows Server 2025) scaffolded 2026-05-20**, ratification
+> pending. With 0.G.7 the OLTP tier is SEALED (5/5 clusters):
 >
 > - **0.G.1** (6-node Redis Cluster mTLS) — smoke ALL GREEN on
 >   `envs/oltp-redis/` via `oltp-redis-node.vmx`.
@@ -24,8 +25,23 @@
 >   0.G.3 proxysql-1/2 + VIP `.50` pattern — no SPOF on the LB tier). etcd
 >   3-member raft quorum holds the DCS with HTTP basic-auth RBAC; PG
 >   streaming replication over mTLS. Ratification surfaced **18 transients**
->   end-to-end (full chronology in §3.x); all permanent fixes baked into
+>   end-to-end (full chronology in §3.4); all permanent fixes baked into
 >   per-engine Ansible roles, per-cluster TF overlays, and the smoke gate.
+>
+> - **0.G.7** (2 SQL Server FCI nodes sharing iSCSI LUN + 2 AG async
+>   replicas; 4 ws2025-desktop nodes + 3 WSFC-managed VIPs:
+>   cluster `.70.15`, FCI `.70.16`, AG Listener `.70.17`) — **scaffolded
+>   2026-05-20**, ratification pending. SQL Server 2022 Developer Edition
+>   (MSDN per ADR-0144); WSFC quorum=NodeMajority across all 4; FCI shares
+>   iSCSI LUN via tgt target on nexus-gateway (per ADR-0026); AG endpoint
+>   auth = certificate-based per ADR-0027; Listener cert IP-SAN .17
+>   validates client TLS across failover (per ADR-0025); SQL service runs
+>   as `nexus.lab\gmsa-sql-engine$` GMSA (Phase 0.G.7 is the first
+>   real GMSA consumer; 0.D.5 scaffolded the infrastructure). Hybrid
+>   FCI+AG architecture sealed with Greg 2026-05-20 — see memory entry
+>   `project_nexus_infra_oltp_0g7_phase`. Ratification will surface the
+>   transient chronology in §3.5 (empty at scaffold; the lab's first
+>   Windows-fleet sub-phase will have its own discoveries).
 >
 > Cold-rebuild surfaced **11 additional transients** beyond the 16 from
 > the legacy monolithic 0.G.3 attempt; all root-caused + permanent fixes
@@ -181,10 +197,11 @@ The legacy monolithic `scripts/oltp.ps1` was removed in 0.G.3.5c chunk 2. Its ol
 ### §1.4 Verify the exit gate
 
 ```pwsh
-pwsh -File scripts\oltp-redis.ps1   smoke   # 0.G.1: ~50 checks across 9 sections
-pwsh -File scripts\oltp-mongo.ps1   smoke   # 0.G.2: ~45 checks across 9 sections
-pwsh -File scripts\oltp-percona.ps1 smoke   # 0.G.3: ~80 checks across 12 sections
-pwsh -File scripts\oltp-patroni.ps1 smoke   # 0.G.4: ~90 checks across 13 sections (etcd quorum + Patroni shape + HAProxy HA pair + VRRP VIP)
+pwsh -File scripts\oltp-redis.ps1     smoke   # 0.G.1: ~50 checks across 9 sections
+pwsh -File scripts\oltp-mongo.ps1     smoke   # 0.G.2: ~45 checks across 9 sections
+pwsh -File scripts\oltp-percona.ps1   smoke   # 0.G.3: ~80 checks across 12 sections
+pwsh -File scripts\oltp-patroni.ps1   smoke   # 0.G.4: ~90 checks across 13 sections (etcd quorum + Patroni shape + HAProxy HA pair + VRRP VIP)
+pwsh -File scripts\oltp-sqlserver.ps1 smoke   # 0.G.7: ~165 checks across 14 sections (WSFC + FCI + AG + Listener + IP-SAN cert verify)
 ```
 
 Each smoke script (`smoke-0.G.{1,2,3,4}.ps1` under the hood) runs reachability → firstboot → identity → vault-agent → TLS material → per-cluster config → service active → TLS listener → cluster health → end-to-end round-trip. Each check echoes `[OK]/[FAIL]`; exits 1 on any failure, 0 on all-green.
@@ -296,7 +313,7 @@ This is the key win over the legacy monolithic `oltp.ps1 destroy` which would te
 | 0.G.3.5c chunk 1 | live cold-rebuild via per-cluster envs + permanent fixes for 11 new transients | proves 0.G.3.5b states | builds 0.G.3.5a templates | smoke gates per cluster ALL GREEN | ✅ PROVEN end-to-end 2026-05-18 ([commit d076abd](https://github.com/grezap/nexus-infra-oltp/commit/d076abd)) | 2026-05-18 |
 | 0.G.3.5c chunk 2 | delete legacy `packer/oltp-node/` + `terraform/envs/oltp/` + `scripts/oltp.ps1` + CI matrix cleanup + handbook canonicalization | — | — | — | ✅ removed 2026-05-18 (this commit); CI matrix scoped to 4 per-engine templates + 3 per-cluster envs only | 2026-05-18 |
 | 0.G.4 | Patroni + etcd + HAProxy HA pair + VRRP VIP `.60` (8 nodes) | `terraform/envs/oltp-patroni/` ✅ | `packer/oltp-{patroni,etcd,haproxy}-node/` ✅ (3 per-engine templates; haproxy template bakes keepalived) | `smoke-0.G.4.ps1` ✅ **ALL 152 CHECKS PASSED 2026-05-19** | ✅ **PROVEN end-to-end 2026-05-19** -- foundation v5 + security patroni overlays + 3 Packer templates + per-cluster TF env (7 overlays incl. haproxy-keepalived) + operator wrapper + smoke gate (152 checks, 13 sections) + 4 demo playbooks. 18 transients surfaced + all root-caused + permanent fixes baked into source (full chronology in §3.x). | 2026-05-19 |
-| 0.G.7 | SQL Server FCI + AG (4 ws2025 nodes) | TBD | NEW ws2025 template | `smoke-0.G.7.ps1` | not started | — |
+| 0.G.7 | SQL Server FCI + AG (4 ws2025-desktop nodes; 2 FCI + 2 AG-replica) | `terraform/envs/oltp-sqlserver/` ✅ (9 role-overlays) | `packer/oltp-sqlserver-node/` ✅ (clones ws2025-desktop.vmx + adds SQL 2022 Developer + WSFC + iSCSI + MPIO features) | `smoke-0.G.7.ps1` ✅ (~165 checks across 14 sections) | ✅ **SCAFFOLDED 2026-05-20** — foundation v6 dnsmasq overlay + iSCSI target on nexus-gateway + 5 security sqlserver overlays + 9-overlay per-cluster TF env + operator wrapper + smoke gate. Hybrid FCI+AG architecture per `vms.yaml` canon (sealed with Greg 2026-05-20). ADR-0026 (iSCSI shared storage) + ADR-0027 (AG endpoint cert auth) ship alongside. Ratification pending — first Windows-fleet sub-phase will discover its own transient chronology (§3.5). | scaffold 2026-05-20 |
 
 (0.G.5 ClickHouse + 0.G.6 StarRocks belong to the sibling `nexus-infra-analytics` repo.)
 
@@ -573,3 +590,61 @@ end-to-end after the smoke gate passes.
 - **PG `data_dir` perms during operator wipe**: `sudo rm -rf /var/lib/nexus-patroni/data` removes the parent dir too if you're root. PG/Patroni won't auto-recreate. Always re-create with the strict mode: `sudo mkdir -p /var/lib/nexus-patroni/data && sudo chown postgres:postgres /var/lib/nexus-patroni /var/lib/nexus-patroni/data && sudo chmod 0700 /var/lib/nexus-patroni /var/lib/nexus-patroni/data`.
 
 (Table grows as new transients surface during future cycles.)
+
+### §3.5 0.G.7 scaffold notes + pending ratification
+
+**Status (2026-05-20):** scaffolded; ratification + transient chronology
+pending. The 0.G.7 work is the first NexusPlatform sub-phase delivering a
+**Windows-fleet** data cluster (vs the 6 Linux clusters in 0.G.1-0.G.4 +
+0.H.* + 0.E.*). It exercises previously-scaffolded-but-unused
+infrastructure for the first time:
+
+- **GMSA** — `gmsa-sql-engine$` is the first real consumer of the GMSA
+  scaffolding from 0.D.5. Per `memory/feedback_kds_rootkey_server2025_ssh.md`,
+  Server 2025's `Add-KdsRootKey` is structurally broken over SSH; the KDS
+  root key must be added manually via RDP/console. If `Get-KdsRootKey`
+  returns empty on dc-nexus, `Test-ADServiceAccount gmsa-sql-engine` will
+  FAIL even though the GMSA AD object exists. The security overlay
+  `role-overlay-dc-gmsa-sqlserver.tf` WARNs but doesn't fail in this
+  case; operator follow-up: RDP dc-nexus + `Add-KdsRootKey -EffectiveTime
+  ((Get-Date).AddHours(-10))`.
+
+- **iSCSI** — first non-NFS storage daemon on nexus-gateway (NFSv4 for
+  Portainer landed at 0.E.4a). Per ADR-0026: tgt over VMnet11 to FCI pair
+  only, CHAP-authed, per-IP ACL. ~60 GB sparse LUN at `/srv/iscsi/
+  sql-fci-shared.img` exported via `iqn.2026-05.local.nexus:sql-fci.lun1`.
+
+- **WSFC** — first multi-Windows clustered service. Quorum=NodeMajority
+  across 4 nodes (cluster IP `.70.15` is the WSFC management address);
+  tolerates 1-node failure. No file-share / cloud witness (deferred).
+
+- **FCI** — first SQL Server FCI in the lab. Re-runs setup.exe in
+  `/ACTION=InstallFailoverCluster` mode on sql-fci-1 + `/ACTION=AddNode`
+  on sql-fci-2 to convert the standalone-baked SQL instance into an FCI
+  resource sharing the iSCSI CSV at S:\.
+
+- **AG** — Always On Availability Group `nexus-ag`: FCI primary +
+  sql-ag-rep-1/2 as async secondaries. AG endpoint auth = certificate-
+  based per ADR-0027 (avoids Windows endpoint-hop service login sprawl).
+
+- **AG Listener** — per ADR-0025 the Listener (.70.17) IS the LB-tier
+  HA primitive for AG. Listener cert (CN=`sql-ag-listener.nexus.lab`,
+  IP-SAN .17) imported into `LocalMachine\My` on all 4 nodes; bound to
+  MSSQLSERVER via `SuperSocketNetLib\Certificate` thumbprint. Client TLS
+  validates against the floating IP across AG failover.
+
+**Ratification will populate this table as transients surface.** Known
+risk areas + likely transients to watch for during the first live cycle:
+
+| # | Risk area | Likely transient class |
+|---|---|---|
+| (pending) | iSCSI initiator + Win + CHAP | Possible mismatch between tgt's CHAP semantics + Windows iSCSI initiator's auth-mode negotiation. Symptom: `Connect-IscsiTarget` returns "Authentication failed". Recovery: verify CHAP secret length ≥12, verify initiator-address ACL on tgt side matches .70.11/.12. |
+| (pending) | KDS root key broken on Server 2025 | Probable WARN+continue on first security apply per memory feedback. Operator manual RDP step required. |
+| (pending) | SQL setup.exe FCI on iSCSI CSV path | First-ever FCI install may need /FAILOVERCLUSTERIPADDRESSES format adjustment; the CSV path must be Online + accessible from sql-fci-1 BEFORE setup.exe is invoked. |
+| (pending) | AG endpoint cert distribution | The 4×3 = 12-file `BACKUP CERTIFICATE ... TO FILE` + scp-to-peers + `CREATE CERTIFICATE ... FROM FILE` round-trip is brittle (file paths, ACLs, encryption-by-password mismatches). |
+| (pending) | Listener cert binding to SuperSocketNetLib | Setting `Certificate` registry value + `ForceEncryption=1` + restarting MSSQLSERVER must complete BEFORE clients try TLS. Race possible. |
+| (pending) | GMSA pwd retrieval timing | `Install-ADServiceAccount` may return success but Test-ADServiceAccount still fails if KDS replication hasn't propagated. Mitigated by single-DC lab. |
+
+(Pre-ratification: the 9-overlay apply order in `main.tf` reflects best-
+known WSFC+FCI+AG dependencies. Live ratification will discover the gaps.)
+
