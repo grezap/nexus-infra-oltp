@@ -145,6 +145,31 @@ $setupArgs = @(
     "/PRODUCTCOVEREDBYSA=False"
 ) -join ' '
 
+# Transient #16 at 0.G.7 ratify 2026-05-20: SQL 2025 Setup's
+# DataStoreService.SerializeObject calls ProtectedData.Protect (DPAPI)
+# to encrypt the entire config datastore -- even with no SA password +
+# Windows-only auth. DPAPI Protect fails with 0x80070005 ACCESS_DENIED
+# because nexusadmin's DPAPI master key isn't initialized yet (Packer's
+# WinRM session is non-interactive; the OOBE auto-logon was brief +
+# may not have fully initialized the user's CryptoAPI state).
+# Force DPAPI initialization explicitly for both scopes before setup.exe.
+# Diagnostic: any throw here surfaces the EXACT scope that's broken.
+Write-Host "=== 10-sql-install: initializing DPAPI master keys (workaround for SQL 2025 SerializeObject) ==="
+Add-Type -AssemblyName System.Security
+$dummy = [System.Text.Encoding]::UTF8.GetBytes("dpapi-init-$(Get-Random)")
+try {
+    $protected_user = [System.Security.Cryptography.ProtectedData]::Protect($dummy, $null, 'CurrentUser')
+    Write-Host "  - CurrentUser scope: OK ($($protected_user.Length) bytes)"
+} catch {
+    Write-Host "  - CurrentUser scope: FAILED -- $($_.Exception.Message)"
+}
+try {
+    $protected_machine = [System.Security.Cryptography.ProtectedData]::Protect($dummy, $null, 'LocalMachine')
+    Write-Host "  - LocalMachine scope: OK ($($protected_machine.Length) bytes)"
+} catch {
+    Write-Host "  - LocalMachine scope: FAILED -- $($_.Exception.Message)"
+}
+
 Write-Host "=== 10-sql-install: launching setup.exe (silent, ~18 min) ==="
 Write-Host "    Edition: $sqlEdition"
 Write-Host "    Features: $sqlFeatures"
