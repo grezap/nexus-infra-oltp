@@ -253,7 +253,12 @@ build {
       "NEXUS_ISO_PATH=C:/Windows/Temp/sqlserver.iso",
       # ISO source: Packer's HTTP server, populated from http_directory
       # = H:/VMS/ISO. The basename of the ISO becomes the URL path.
-      "NEXUS_ISO_URL=http://{{ .HTTPIP }}:{{ .HTTPPort }}/SqlServer2025EnterpriseDeveloperEdition.iso",
+      # Transient #12 at 0.G.7 ratify 2026-05-20: legacy `{{ .HTTPIP }}` Go-
+      # template syntax is JSON-template-only -- silently renders as
+      # literal "<no value>" in HCL2. HCL2 syntax is `${build.HTTPIP}` +
+      # `${build.HTTPPort}` (Packer injects the `build` var into provisioner
+      # blocks at apply time).
+      "NEXUS_ISO_URL=http://${build.HTTPIP}:${build.HTTPPort}/SqlServer2025EnterpriseDeveloperEdition.iso",
     ]
   }
 
