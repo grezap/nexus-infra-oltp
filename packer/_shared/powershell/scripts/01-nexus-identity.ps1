@@ -128,7 +128,17 @@ Subsystem sftp sftp-server.exe
 '@
 Set-Content -Path $sshdConfig -Value $config -Encoding ascii
 
-# 5. Enable + start the service
+# 5. Set DefaultShell to PowerShell. Without this, SSH defaults to cmd.exe
+# which can't interpret PS-syntax commands sent over the wire (`if (Test-
+# Path ...) { ... }` etc.). Downstream role-overlays (notably nexus-infra-
+# oltp/terraform/envs/oltp-sqlserver/role-overlay-*.tf) probe + script
+# Windows VMs over SSH using PS syntax. Transient #21 at 0.G.7 ratify
+# 2026-05-21 -- one-line registry set surfaces every PS-via-SSH probe
+# from "silently fails (cmd doesn't understand)" to "actually runs".
+New-ItemProperty -Path 'HKLM:\SOFTWARE\OpenSSH' -Name 'DefaultShell' `
+    -Value (Get-Command powershell).Source -PropertyType String -Force | Out-Null
+
+# 6. Enable + start the service
 Set-Service -Name sshd -StartupType Automatic
 Restart-Service -Name sshd -Force
 
@@ -136,4 +146,4 @@ Restart-Service -Name sshd -Force
 Set-Service -Name ssh-agent -StartupType Automatic
 Start-Service -Name ssh-agent
 
-Write-Host "=== 01-nexus-identity: OK (sshd=Running, authorized_keys deployed) ==="
+Write-Host "=== 01-nexus-identity: OK (sshd=Running, DefaultShell=powershell, authorized_keys deployed) ==="
