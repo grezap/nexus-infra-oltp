@@ -88,8 +88,11 @@ source "vmware-vmx" "oltp-sqlserver-node" {
   vmx_data = {
     "annotation"           = "oltp-sqlserver-node template (Phase 0.G.7) -- built by Packer; SQL Server ${var.sql_version} ${var.sql_edition} + Failover-Clustering + Multipath-IO + iSCSI-Initiator on top of ws2025-desktop"
     "tools.upgrade.policy" = "useGlobal"
-    "memsize"              = tostring(var.memory_mb)
-    "numvcpus"             = tostring(var.cpus)
+    # Packer HCL2 has no tostring() function (Terraform does; Packer doesn't).
+    # Use ${} interpolation which converts number -> string. Transient #7 at
+    # 0.G.7 ratify 2026-05-20.
+    "memsize"  = "${var.memory_mb}"
+    "numvcpus" = "${var.cpus}"
   }
 
   # OOBE completes within ~3-5 min after power-on; SSH provisioner waits.

@@ -652,6 +652,8 @@ Server sidecars + AD group + GMSA + Vault KV entries + dnsmasq v6 + tgt
 target + LUN 1 + nftables rules live + verified. iSCSI target reachable
 from build host probes. Ready for Packer bake once SQL ISO arrives.
 
+| 7 | `packer build oltp-sqlserver-node` fails fast (~5 sec) with `Error: Call to unknown function "tostring"` on lines 91-92 of the Packer template (`vmx_data { "memsize" = tostring(var.memory_mb) }` + `"numvcpus" = tostring(var.cpus)`). | Packer HCL2 has its own function library which overlaps with but is NOT identical to Terraform's. `tostring()` is a Terraform function (terraform/internal/funcs/tostring), NOT a Packer function. Packer 1.11 supports `format()`, `formatlist()`, `tonumber()`, `tomap()`, `tolist()`, `toset()`, etc. -- but no `tostring()`. The function exists in Terraform 0.12+ but was never added to Packer's HCL fork. | Use string interpolation `"${var.memory_mb}"` instead of `tostring(var.memory_mb)`. Interpolation auto-converts the number to a string in the rendered template. Permanent fix in `oltp-sqlserver-node.pkr.hcl` lines 91-92. |
+
 **Anticipated transient classes still pending discovery** (pre-ratification
 predictions; some may not surface, others not anticipated will):
 
