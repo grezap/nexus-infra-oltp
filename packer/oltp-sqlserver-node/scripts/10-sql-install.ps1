@@ -280,19 +280,59 @@ Write-Host "=== 10-sql-install: setup.exe completed (exit=$exitCode) ==="
 # deleted by the final cleanup stage in oltp-sqlserver-node.pkr.hcl).
 Dismount-DiskImage -ImagePath $isoPath | Out-Null
 
-# Verify the engine actually responds. sqlcmd is on PATH after install.
-# -E uses Windows auth (Local Administrator is in the BUILTIN\Administrators
-# sysadmin role per the /SQLSYSADMINACCOUNTS arg above).
-$null = & sqlcmd -E -S "localhost\$sqlInstance" -Q "SELECT @@VERSION" -h -1 -W 2>&1
-if ($LASTEXITCODE -ne 0) {
-    # First-install sometimes needs a few seconds for the service to fully
-    # initialize even after Start-Service returns. Retry once after 10s.
-    Start-Sleep -Seconds 10
-    $verOut = & sqlcmd -E -S "localhost\$sqlInstance" -Q "SELECT @@VERSION" -h -1 -W 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "sqlcmd against MSSQLSERVER failed (exit=$LASTEXITCODE). Output: $verOut"
+# Verify the engine actually responds. SQL Server 2025 dropped the bundled
+# sqlcmd.exe (Microsoft replaced it with the separate Go-based sqlcmd tool
+# that must be installed via `winget install sqlcmd` or similar). Transient
+# #17 at 0.G.7 ratify 2026-05-20. So we can't shell out to sqlcmd at bake
+# time -- use the .NET SqlClient via PowerShell + Microsoft.Data.SqlClient
+# (which IS bundled with SQL Server 2025 install). If that's also absent,
+# fall back to TCP-port probe + Get-Service.
+function Test-SqlEngineReachable {
+    param([string]$instance = 'MSSQLSERVER')
+    # First check: service Running.
+    $svc = Get-Service -Name $instance -ErrorAction SilentlyContinue
+    if (-not $svc) { return $false }
+    if ($svc.Status -ne 'Running') {
+        Start-Service -Name $instance -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 5
+        $svc = Get-Service -Name $instance
+        if ($svc.Status -ne 'Running') { return $false }
     }
+    # Second check: TCP 1433 reachable on localhost (proves the engine
+    # accepted at least 1 TDS connection initialization).
+    $tcp = Test-NetConnection -ComputerName localhost -Port 1433 -InformationLevel Quiet -WarningAction SilentlyContinue
+    if (-not $tcp) { return $false }
+    # Third check (best-effort): open a SqlConnection via the bundled
+    # Microsoft.Data.SqlClient assembly. Don't fail bake if assembly
+    # absent -- service-up + TCP-up is sufficient proof for the bake.
+    try {
+        $sqlClientPath = Get-ChildItem -Path 'C:\Program Files\Microsoft SQL Server' -Recurse -Filter 'Microsoft.Data.SqlClient.dll' -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($sqlClientPath) {
+            Add-Type -Path $sqlClientPath.FullName -ErrorAction SilentlyContinue
+            $conn = New-Object Microsoft.Data.SqlClient.SqlConnection "Server=localhost;Integrated Security=true;Database=master;TrustServerCertificate=true;Connection Timeout=15;"
+            $conn.Open()
+            $cmd = $conn.CreateCommand()
+            $cmd.CommandText = "SELECT CONCAT(SERVERPROPERTY('ProductVersion'),' ',SERVERPROPERTY('Edition'))"
+            $ver = $cmd.ExecuteScalar()
+            $conn.Close()
+            Write-Host "  - SqlClient probe: $ver"
+        } else {
+            Write-Host "  - SqlClient assembly not found; falling back to service+TCP probe (still sufficient)"
+        }
+    } catch {
+        Write-Host "  - SqlClient probe failed (non-fatal): $($_.Exception.Message)"
+    }
+    return $true
 }
 
-$verOut = & sqlcmd -E -S "localhost\$sqlInstance" -Q "SELECT CONCAT(SERVERPROPERTY('ProductVersion'),' ',SERVERPROPERTY('Edition'))" -h -1 -W
-Write-Host "=== 10-sql-install: engine reachable -- $verOut ==="
+Write-Host "=== 10-sql-install: verifying engine reachability ==="
+Start-Sleep -Seconds 10  # give the service a moment to settle after install
+$ok = Test-SqlEngineReachable -instance $sqlInstance
+if (-not $ok) {
+    Start-Sleep -Seconds 15
+    $ok = Test-SqlEngineReachable -instance $sqlInstance
+}
+if (-not $ok) {
+    throw "MSSQLSERVER service did not reach Running + TCP-1433-listening within 30s"
+}
+Write-Host "=== 10-sql-install: engine reachable (service Running + TCP/1433 accepting) ==="

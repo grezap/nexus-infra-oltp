@@ -163,14 +163,29 @@ try {
 }
 Start-Service -Name MSSQLSERVER
 
-# Verify HADR is actually enabled. sys.dm_hadr_cluster fields work only
-# after AG creation; instead query the server property.
+# Verify HADR is actually enabled via Microsoft.Data.SqlClient (transient
+# #17 at 0.G.7 ratify 2026-05-20: SQL 2025 dropped the bundled sqlcmd.exe).
 Start-Sleep -Seconds 5
-$hadrCheck = & sqlcmd -E -Q "SELECT SERVERPROPERTY('IsHadrEnabled') AS hadr_enabled" -h -1 -W 2>&1
-if ($hadrCheck -notmatch '\b1\b') {
-    Write-Host "WARN: SERVERPROPERTY('IsHadrEnabled') = $hadrCheck (expected 1). HADR may need an additional SQL service restart -- terraform's ag-bootstrap step will retry."
-} else {
-    Write-Host "  - HADR enabled (SERVERPROPERTY confirmed)"
+try {
+    $sqlClientPath = Get-ChildItem -Path 'C:\Program Files\Microsoft SQL Server' -Recurse -Filter 'Microsoft.Data.SqlClient.dll' -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($sqlClientPath) {
+        Add-Type -Path $sqlClientPath.FullName -ErrorAction SilentlyContinue
+        $conn = New-Object Microsoft.Data.SqlClient.SqlConnection "Server=localhost;Integrated Security=true;Database=master;TrustServerCertificate=true;Connection Timeout=15;"
+        $conn.Open()
+        $cmd = $conn.CreateCommand()
+        $cmd.CommandText = "SELECT CAST(SERVERPROPERTY('IsHadrEnabled') AS int) AS hadr_enabled"
+        $hadr = $cmd.ExecuteScalar()
+        $conn.Close()
+        if ($hadr -eq 1) {
+            Write-Host "  - HADR enabled (SERVERPROPERTY confirmed via SqlClient)"
+        } else {
+            Write-Host "WARN: SERVERPROPERTY('IsHadrEnabled') = $hadr (expected 1). HADR may need an additional SQL service restart -- terraform's ag-bootstrap step will retry."
+        }
+    } else {
+        Write-Host "  - SqlClient assembly not found; HADR verify skipped (terraform's ag-bootstrap step will surface any HADR issue)"
+    }
+} catch {
+    Write-Host "WARN: HADR verify failed via SqlClient (non-fatal): $($_.Exception.Message). Terraform's ag-bootstrap step will retry."
 }
 
 Write-Host "=== 11-cluster-features: complete; Packer will restart the VM next ==="
