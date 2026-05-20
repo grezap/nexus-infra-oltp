@@ -93,7 +93,24 @@ source "vmware-vmx" "oltp-sqlserver-node" {
     # 0.G.7 ratify 2026-05-20.
     "memsize"  = "${var.memory_mb}"
     "numvcpus" = "${var.cpus}"
+
+    # Transient #8 at 0.G.7 ratify: source ws2025-desktop.vmx was baked with
+    # vmx_remove_ethernet_interfaces=true so the cloned VM had ZERO NICs ->
+    # no IP -> Packer SSH timed out at 30:30. The vmware-vmx builder does
+    # NOT auto-add NICs like vmware-iso does. Add a build-time NAT NIC via
+    # vmx_data so the OOBE-completed VM can reach DHCP + Packer can find it
+    # via VMware Tools' IP report.
+    "ethernet0.present"        = "TRUE"
+    "ethernet0.connectionType" = "nat"
+    "ethernet0.virtualDev"     = "e1000e"
+    "ethernet0.addressType"    = "generated"
+    "ethernet0.startConnected" = "TRUE"
   }
+
+  # Strip the build-time NIC from the OUTPUT VMX so terraform/modules/vm's
+  # configure-vm-nic.ps1 can add the dual-NIC config at clone time (VMnet11
+  # + VMnet10) per the canon pattern. Same as ws2025-desktop's bake.
+  vmx_remove_ethernet_interfaces = true
 
   # OOBE completes within ~3-5 min after power-on; SSH provisioner waits.
   # The source's 01-nexus-identity.ps1 auto-starts sshd + injects
