@@ -41,7 +41,13 @@ Write-Host "=== 11-cluster-features: installing WSFC + iSCSI + MPIO + opening fi
 # cmdlets. -Restart $false lets us batch all 3 + take ONE restart at
 # the end via Packer's windows-restart provisioner.
 # ---------------------------------------------------------------------
-$features = @('Failover-Clustering', 'Multipath-IO', 'iSCSI-Initiator')
+# Note: 'iSCSI-Initiator' is NOT a Windows Server 2025 feature name --
+# WS2025 ships the iSCSI Initiator service (msiscsi) as built-in by
+# default (no separate feature install). Transient #18 at 0.G.7 ratify
+# 2026-05-20. So we only need Failover-Clustering + Multipath-IO here;
+# msiscsi service activation lives in role-overlay-iscsi-attach.tf
+# (terraform apply time, FCI nodes only -- AG replicas don't use iSCSI).
+$features = @('Failover-Clustering', 'Multipath-IO')
 foreach ($f in $features) {
     $state = (Get-WindowsFeature -Name $f).InstallState
     if ($state -eq 'Installed') {
@@ -54,6 +60,14 @@ foreach ($f in $features) {
         throw "Install-WindowsFeature $f failed: $($result.ExitCode)"
     }
     Write-Host "  - $f : installed (RestartNeeded=$($result.RestartNeeded))"
+}
+
+# Verify msiscsi service exists (built-in on WS2025; sanity-check).
+$msiscsi = Get-Service -Name 'msiscsi' -ErrorAction SilentlyContinue
+if ($msiscsi) {
+    Write-Host "  - iSCSI Initiator service (msiscsi) : present + $($msiscsi.StartType) (left as-is; role-overlay-iscsi-attach.tf flips it Automatic on FCI nodes at apply time)"
+} else {
+    Write-Host "  WARN: msiscsi service not found. iSCSI attach at terraform apply time will fail. May need 'Enable-WindowsOptionalFeature -Online -FeatureName MicrosoftiSCSIInitiator' on WS2025 (different cmdlet, different feature name)."
 }
 
 # ---------------------------------------------------------------------
