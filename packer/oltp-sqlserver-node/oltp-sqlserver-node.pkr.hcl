@@ -180,11 +180,12 @@ source "vmware-iso" "oltp_sqlserver_node" {
   shutdown_command = "powershell -NoProfile -Command \"Write-Host 'sysprep handled shutdown; waiting'\""
   shutdown_timeout = "30m"
 
-  # DEBUG: headless=false so the operator can watch the bake via VMware
-  # Workstation GUI. Flip back to true after the bake works end-to-end.
-  # Transient #9 at 0.G.7 ratify 2026-05-20 -- 2h WinRM timeout on first
-  # vmware-iso attempt; need eyes-on to identify which install stage stalls.
-  headless = false
+  # headless=true is the canonical bake mode (matches ws2025-desktop + the
+  # deb13/oltp-* templates). During the 0.G.7 ratify debug cycle 2026-05-20
+  # this was flipped to false for VNC-driven specialize-pass diagnosis
+  # (transient #10); now flipped back to true since the install + OOBE +
+  # baseline path is proven through transient #11 (the SQL-ISO HTTP fix).
+  headless = true
 
   tools_mode        = "attach"
   tools_source_path = "C:/Program Files (x86)/VMware/VMware Workstation/windows.iso"
