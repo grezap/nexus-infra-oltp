@@ -20,9 +20,20 @@
  */
 
 variable "vm_name" {
-  description = "Name of the bake-time VM + output dir name. Per-engine canon: matches template ID."
+  description = "Name of the bake-time VM + output dir name. Per-engine canon: matches template ID. 19 chars -- fine for VMware-side identity (VMware VM names have no NetBIOS limit), but NOT used as the Windows ComputerName during install (which is bake_computer_name)."
   type        = string
   default     = "oltp-sqlserver-node"
+}
+
+variable "bake_computer_name" {
+  description = "Windows ComputerName for the BAKE-TIME VM only. MUST be <=15 chars (NetBIOS limit; per memory/feedback_windows_ssh_automation.md). Clones rename to sql-fci-1/2/sql-ag-rep-1/2 (all 11-12 chars + NetBIOS-valid) via firstboot.ps1 at clone time, so this value is effectively a throwaway placeholder. Setup.exe REJECTS the Autounattend if ComputerName > 15 chars (hrResult 0x80220005). Transient #10 at 0.G.7 ratify 2026-05-20."
+  type        = string
+  default     = "OLTPSQL-BAKE"
+
+  validation {
+    condition     = length(var.bake_computer_name) <= 15 && can(regex("^[A-Za-z][A-Za-z0-9-]{0,13}[A-Za-z0-9]$", var.bake_computer_name))
+    error_message = "The bake_computer_name must be 2-15 chars, alphanumeric + hyphens only, starting with a letter and ending with letter or digit (NetBIOS rules)."
+  }
 }
 
 variable "output_directory" {
@@ -124,9 +135,9 @@ variable "admin_password" {
 }
 
 variable "winrm_timeout" {
-  description = "WinRM timeout for the bake. WS2025 OOBE + first-boot can take 10-15 min; 2h is conservative."
+  description = "WinRM timeout for the bake. WS2025 OOBE + first-boot can take 10-15 min; 30m for debug iteration (fails fast); flip back to 2h once the bake works end-to-end."
   type        = string
-  default     = "2h"
+  default     = "30m"
 }
 
 # ─── SQL Server install knobs ──────────────────────────────────────────────

@@ -99,12 +99,23 @@ locals {
   # Render the Autounattend.xml from the shared template (same one ws2025-
   # desktop uses; copied into nexus-infra-oltp/packer/_shared/powershell/
   # floppy/ during the 0.G.7 ratify pivot 2026-05-20).
+  #
+  # computer_name = var.bake_computer_name -- NOT var.vm_name, because
+  # var.vm_name ("oltp-sqlserver-node", 19 chars) exceeds the NetBIOS
+  # 15-char limit + Windows Setup rejects the Autounattend during the
+  # specialize pass (hrResult 0x80220005 "Value is invalid" against
+  # Microsoft-Windows-Shell-Setup). Transient #10 at 0.G.7 ratify
+  # 2026-05-20 -- per memory/feedback_windows_ssh_automation.md the
+  # NetBIOS-15-char limit is the first of 5 structural patterns. The
+  # template VM's computer name is irrelevant at runtime; clones rename
+  # to sql-fci-1/2/sql-ag-rep-1/2 (11-12 chars, all NetBIOS-valid) via
+  # firstboot.ps1 + Rename-Computer.
   autounattend_xml = templatefile("${path.root}/../_shared/powershell/floppy/Autounattend.xml.tpl", {
     image_name          = local.image_name
     product_key         = local.product_key
     admin_username      = var.admin_username
     admin_password      = var.admin_password
-    computer_name       = var.vm_name
+    computer_name       = var.bake_computer_name
     bypass_win11_checks = false
   })
 }
@@ -158,7 +169,11 @@ source "vmware-iso" "oltp_sqlserver_node" {
   shutdown_command = "powershell -NoProfile -Command \"Write-Host 'sysprep handled shutdown; waiting'\""
   shutdown_timeout = "30m"
 
-  headless = true
+  # DEBUG: headless=false so the operator can watch the bake via VMware
+  # Workstation GUI. Flip back to true after the bake works end-to-end.
+  # Transient #9 at 0.G.7 ratify 2026-05-20 -- 2h WinRM timeout on first
+  # vmware-iso attempt; need eyes-on to identify which install stage stalls.
+  headless = false
 
   tools_mode        = "attach"
   tools_source_path = "C:/Program Files (x86)/VMware/VMware Workstation/windows.iso"
