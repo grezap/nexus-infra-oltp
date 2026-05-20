@@ -133,6 +133,14 @@ $setupArgs = @(
     "/UPDATEENABLED=0"
     "/SQLCOLLATION=SQL_Latin1_General_CP1_CI_AS"
     "/IACCEPTSQLSERVERLICENSETERMS"
+    # SQL Server 2025-specific required args (transient #14 at 0.G.7 ratify
+    # 2026-05-20). SQL 2025 made memory limits mandatory at install time +
+    # added Azure Arc/Software-Assurance opt-out flags. Missing these
+    # surfaces as `0x84B40001 "There was an error generating the XML
+    # document"` -- SQL Setup's catch-all for CLI args it can't marshal
+    # into its internal ConfigurationFile.ini.
+    "/USESQLRECOMMENDEDMEMORYLIMITS=true"
+    "/PRODUCTCOVEREDBYSA=False"
 ) -join ' '
 
 Write-Host "=== 10-sql-install: launching setup.exe (silent, ~18 min) ==="
@@ -150,16 +158,45 @@ $exitCode = $proc.ExitCode
 # (11-cluster-features.ps1) is followed by a windows-restart provisioner
 # anyway.
 if ($exitCode -ne 0 -and $exitCode -ne 3010) {
-    # Try to surface the most recent setup log path for debugging.
+    # Surface the most recent setup log paths. SQL Setup writes:
+    #   - Summary.txt: human-readable summary (created late in install; may
+    #     not exist if setup.exe died at CLI-arg-validation -- which is
+    #     transient #14's failure mode).
+    #   - Detail.txt: every line setup.exe printed (created early; almost
+    #     always present even on early failures). This is the actual diag.
+    #   - Detail_*_<feature>_<timestamp>.txt: per-feature install logs.
     $logRoot = 'C:\Program Files\Microsoft SQL Server\170\Setup Bootstrap\Log'
     if (Test-Path $logRoot) {
         $latest = Get-ChildItem $logRoot -Directory | Sort-Object LastWriteTime -Descending | Select-Object -First 1
         Write-Host "ERROR: setup.exe exited $exitCode -- latest log dir: $($latest.FullName)"
+
         $summary = Join-Path $latest.FullName 'Summary.txt'
         if (Test-Path $summary) {
-            Write-Host "--- Summary.txt (head -50) ---"
-            Get-Content $summary -TotalCount 50 | Write-Host
+            Write-Host "`n--- Summary.txt (full) ---"
+            Get-Content $summary | Write-Host
+        } else {
+            Write-Host "`n(Summary.txt not present -- setup.exe died before install phase)"
         }
+
+        $detail = Join-Path $latest.FullName 'Detail.txt'
+        if (Test-Path $detail) {
+            Write-Host "`n--- Detail.txt (last 80 lines) ---"
+            Get-Content $detail -Tail 80 | Write-Host
+        } else {
+            Write-Host "`n(Detail.txt not present -- check $($latest.FullName) for any other .txt)"
+            Get-ChildItem $latest.FullName -Filter '*.txt' | ForEach-Object { Write-Host "  $($_.Name) ($($_.Length) bytes)" }
+        }
+
+        # Also check the bootstrap-level log (one above the timestamped dir)
+        # which captures CLI-arg-parse errors that fire before the per-run
+        # timestamped log dir is created.
+        $bootstrap = Join-Path $logRoot 'Bootstrap.log'
+        if (Test-Path $bootstrap) {
+            Write-Host "`n--- Bootstrap.log (last 40 lines) ---"
+            Get-Content $bootstrap -Tail 40 | Write-Host
+        }
+    } else {
+        Write-Host "ERROR: setup.exe exited $exitCode but $logRoot doesn't exist (setup.exe didn't even create the log root)."
     }
     throw "SQL Server setup.exe failed (exit=$exitCode). See logs above."
 }
