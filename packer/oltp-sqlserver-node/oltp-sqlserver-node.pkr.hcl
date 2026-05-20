@@ -149,6 +149,17 @@ source "vmware-iso" "oltp_sqlserver_node" {
     "../_shared/powershell/scripts/bootstrap-winrm.ps1"
   ]
 
+  # Transient #11 at 0.G.7 ratify 2026-05-20: WinRM file-provisioner upload
+  # of the 1.2 GB SQL ISO hits "Couldn't create shell: received error
+  # response" -- WinRM's MaxShellsPerUser=30 exhausts quickly because
+  # Packer's winrmcp opens a fresh shell per chunk. WinRM file uploads
+  # for files >500 MB are fundamentally brittle. Canonical Packer
+  # workaround: serve large files over HTTP via http_directory + use
+  # Invoke-WebRequest inside the guest (skips the WinRM channel entirely).
+  # Pointing at H:/VMS/ISO makes ALL ISOs in that dir HTTP-accessible
+  # during the bake; only the SQL one is consumed by 10-sql-install.ps1.
+  http_directory = "H:/VMS/ISO"
+
   # Same EFI Boot Manager -> CDROM nav as ws2025-desktop; WS2025 ISOs behave
   # identically across editions.
   boot_wait = "90s"
@@ -224,15 +235,11 @@ build {
   }
 
   # ── SQL Server 2025 Enterprise Developer silent install ──
-  # Stage 1: upload the SQL ISO to the guest. Packer's file provisioner
-  # uploads via the WinRM channel. ~1.2 GB for SQL 2025; takes ~2-3 min.
-  provisioner "file" {
-    source      = var.sql_iso_path
-    destination = "C:/Windows/Temp/sqlserver.iso"
-  }
-
-  # Stage 2: SQL Server silent install. Mounts the uploaded ISO via
-  # Mount-DiskImage, runs setup.exe /Q /ACTION=Install, verifies sqlcmd.
+  # ISO is fetched from Packer's HTTP server (http_directory = H:/VMS/ISO)
+  # via Invoke-WebRequest INSIDE 10-sql-install.ps1 -- canonical Packer
+  # pattern for large files that bypasses the WinRM-shell-creation limit
+  # entirely. Transient #11 at 0.G.7 ratify 2026-05-20 (was a `file`
+  # provisioner upload that hit MaxShellsPerUser=30 on the 1.2 GB ISO).
   provisioner "powershell" {
     scripts = [
       "scripts/10-sql-install.ps1"
@@ -243,6 +250,9 @@ build {
       "NEXUS_SQL_FEATURES=${var.sql_install_features}",
       "NEXUS_SQL_INSTANCE=${var.sql_instance_name}",
       "NEXUS_ISO_PATH=C:/Windows/Temp/sqlserver.iso",
+      # ISO source: Packer's HTTP server, populated from http_directory
+      # = H:/VMS/ISO. The basename of the ISO becomes the URL path.
+      "NEXUS_ISO_URL=http://{{ .HTTPIP }}:{{ .HTTPPort }}/SqlServer2025EnterpriseDeveloperEdition.iso",
     ]
   }
 

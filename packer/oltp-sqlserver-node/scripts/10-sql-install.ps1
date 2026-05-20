@@ -40,12 +40,38 @@ $sqlEdition  = $env:NEXUS_SQL_EDITION
 $sqlFeatures = $env:NEXUS_SQL_FEATURES
 $sqlInstance = $env:NEXUS_SQL_INSTANCE
 $isoPath     = $env:NEXUS_ISO_PATH
+$isoUrl      = $env:NEXUS_ISO_URL
 
 if (-not $sqlEdition)  { throw 'NEXUS_SQL_EDITION env var missing' }
 if (-not $sqlFeatures) { throw 'NEXUS_SQL_FEATURES env var missing' }
 if (-not $sqlInstance) { throw 'NEXUS_SQL_INSTANCE env var missing' }
 if (-not $isoPath)     { throw 'NEXUS_ISO_PATH env var missing' }
-if (-not (Test-Path $isoPath)) { throw "SQL ISO not at $isoPath (Packer file provisioner failed?)" }
+if (-not $isoUrl)      { throw 'NEXUS_ISO_URL env var missing (should be Packer http_directory URL)' }
+
+# Stage 0: download the ISO from Packer's HTTP server. Bypasses the WinRM
+# file-provisioner channel which has a hard limit on large files (transient
+# #11 at 0.G.7 ratify 2026-05-20 -- MaxShellsPerUser=30 on the guest +
+# winrmcp opens a fresh shell per chunk -> exhaustion on a 1.2 GB ISO).
+# Invoke-WebRequest over HTTP from the Packer host's served dir is the
+# canonical Packer pattern for large files.
+if (Test-Path $isoPath) {
+    $existingSize = (Get-Item $isoPath).Length
+    Write-Host "=== 10-sql-install: ISO already at $isoPath ($existingSize bytes); skipping download ==="
+} else {
+    Write-Host "=== 10-sql-install: downloading SQL ISO from $isoUrl ==="
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    # ProgressPreference=SilentlyContinue makes Invoke-WebRequest fast on PS5
+    # (the progress bar costs huge CPU on large files; well-known PS quirk).
+    $ProgressPreference = 'SilentlyContinue'
+    try {
+        Invoke-WebRequest -Uri $isoUrl -OutFile $isoPath -UseBasicParsing
+    } catch {
+        throw "ISO download failed: $($_.Exception.Message). Verify Packer http_directory points at the dir containing the ISO + the basename in NEXUS_ISO_URL matches the filename on disk."
+    }
+    $sw.Stop()
+    $size = (Get-Item $isoPath).Length
+    Write-Host ("=== 10-sql-install: download complete -- {0:N1} MB in {1:N1} sec ({2:N1} MB/s) ===" -f ($size/1MB), $sw.Elapsed.TotalSeconds, (($size/1MB)/$sw.Elapsed.TotalSeconds))
+}
 
 Write-Host "=== 10-sql-install: mounting $isoPath ==="
 
