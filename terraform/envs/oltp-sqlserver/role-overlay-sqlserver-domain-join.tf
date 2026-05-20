@@ -42,15 +42,27 @@ resource "null_resource" "sqlserver_domain_join" {
       $sshUser  = '${var.ssh_username}'
       $adDomain = '${var.ad_domain_name}'
       $dcIp     = '${var.ad_dc_ip}'
-      $adBindJson = Join-Path $HOME ".nexus/vault-ad-bind.json"
-
-      if (-not (Test-Path $adBindJson)) {
-        throw "[sqlserver-domain-join] vault-ad-bind.json not found at $adBindJson -- foundation env must apply first (Vault AD integration overlay writes this sidecar)."
+      # Read nexusadmin password from $HOME/.nexus/nexusadmin-credentials.json.
+      # Transient #22 at 0.G.7 ratify 2026-05-21: I originally read from
+      # vault-ad-bind.json which holds the svc-vault-ldap bind creds
+      # (bindpass/binddn fields) -- NOT the nexusadmin domain-admin
+      # creds. The nexusadmin password lives in Vault KV at
+      # nexus/foundation/identity/nexusadmin (fields: username +
+      # password). The nexusadmin-credentials.json sidecar is populated
+      # by security env's role-overlay-vault-nexusadmin-creds-seed.tf
+      # (added 0.G.7 ratify close-out) reading from that KV path. The
+      # foundation env's role-overlay-jumpbox-domainjoin.tf uses
+      # $${local.foundation_creds.nexusadmin} which reads the same KV
+      # path via the vault provider; this oltp env doesn't have the
+      # vault provider configured, hence the sidecar indirection.
+      $adCredsJson = Join-Path $HOME ".nexus/nexusadmin-credentials.json"
+      if (-not (Test-Path $adCredsJson)) {
+        throw "[sqlserver-domain-join] nexusadmin-credentials.json not found at $adCredsJson -- security env's role-overlay-vault-nexusadmin-creds-seed.tf must apply first (writes this sidecar from Vault KV nexus/foundation/identity/nexusadmin)."
       }
-      $adBind = Get-Content $adBindJson -Raw | ConvertFrom-Json
-      $adUser = "$adDomain\\nexusadmin"
-      $adPass = $adBind.nexusadmin_password
-      if (-not $adPass) { throw "[sqlserver-domain-join] nexusadmin_password missing from vault-ad-bind.json" }
+      $adCreds = Get-Content $adCredsJson -Raw | ConvertFrom-Json
+      $adUser = "$adDomain\\$($adCreds.username)"
+      $adPass = $adCreds.password
+      if (-not $adPass) { throw "[sqlserver-domain-join] password field missing from nexusadmin-credentials.json" }
 
       # ── Per-node domain-join (parallel-safe; we run sequentially for
       #    clearer logs; ~3-5 min per node including restart).
