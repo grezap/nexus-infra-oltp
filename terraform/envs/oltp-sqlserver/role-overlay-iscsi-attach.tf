@@ -34,16 +34,16 @@ resource "null_resource" "iscsi_attach" {
     when        = create
     interpreter = ["pwsh", "-NoProfile", "-Command"]
     command     = <<-PWSH
-      $host      = '${each.key}'
+      $hostName      = '${each.key}'
       $ip        = '${each.value.vmnet11}'
       $vmnet10   = '${each.value.vmnet10}'
       $sshUser   = '${var.ssh_username}'
 
-      Write-Host "[iscsi-attach] $host : attaching iSCSI LUN from nexus-gateway..."
+      Write-Host "[iscsi-attach] $hostName : attaching iSCSI LUN from nexus-gateway..."
 
       # Format-Volume is done on sql-fci-1 ONLY (the lower-IP node);
       # sql-fci-2 just attaches the same LUN.
-      $isPrimary = ($host -eq 'sql-fci-1')
+      $isPrimary = ($hostName -eq 'sql-fci-1')
 
       $remote = @"
 `$ErrorActionPreference = 'Stop';
@@ -97,8 +97,8 @@ if ($isPrimary -and `$rawDisk) {
       $b64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($remote))
       $output = ssh -o ConnectTimeout=30 "$sshUser@$ip" "powershell -NoProfile -EncodedCommand $b64" 2>&1 | Out-String
       Write-Host $output.Trim()
-      if ($LASTEXITCODE -ne 0) { throw "[iscsi-attach] $host : iSCSI attach failed (rc=$LASTEXITCODE)" }
-      Write-Host "[iscsi-attach] $host : LUN attached (S:\\ SQL_FCI_SHARED)"
+      if ($LASTEXITCODE -ne 0) { throw "[iscsi-attach] $hostName : iSCSI attach failed (rc=$LASTEXITCODE)" }
+      Write-Host "[iscsi-attach] $hostName : LUN attached (S:\\ SQL_FCI_SHARED)"
     PWSH
   }
 }

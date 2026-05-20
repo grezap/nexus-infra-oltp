@@ -55,15 +55,15 @@ resource "null_resource" "sqlserver_domain_join" {
       # ── Per-node domain-join (parallel-safe; we run sequentially for
       #    clearer logs; ~3-5 min per node including restart).
       foreach ($entry in $nodes.GetEnumerator()) {
-        $host = $entry.Key
+        $hostName = $entry.Key
         $ip   = $entry.Value.vmnet11
-        Write-Host "[sqlserver-domain-join] joining $host ($ip) to $adDomain..."
+        Write-Host "[sqlserver-domain-join] joining $hostName ($ip) to $adDomain..."
 
         # Idempotency probe: PartOfDomain skip.
         $probe = ssh -o ConnectTimeout=15 -o BatchMode=yes "$sshUser@$ip" `
           "if ((Get-CimInstance Win32_ComputerSystem).PartOfDomain) { Write-Output 'JOINED' } else { Write-Output 'NOTJOINED' }" 2>$null
         if ($probe -match 'JOINED') {
-          Write-Host "  - $host : already domain-joined (idempotent skip)"
+          Write-Host "  - $hostName : already domain-joined (idempotent skip)"
           continue
         }
 
@@ -79,32 +79,32 @@ Add-Computer -DomainName '$adDomain' -Credential `$cred -Force -Restart -PassThr
         # Wait for the node to come back after the auto-restart triggered
         # by Add-Computer. WSFC-style fleets wait ~3-4 min for a Windows
         # restart cycle (BIOS POST + Windows boot + domain credentials cache).
-        Write-Host "  - $host : waiting for SSH back post-restart..."
+        Write-Host "  - $hostName : waiting for SSH back post-restart..."
         $deadline = (Get-Date).AddMinutes(8)
         while ((Get-Date) -lt $deadline) {
           $back = ssh -o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=no "$sshUser@$ip" "echo PONG" 2>$null
           if ($back -match 'PONG') {
-            Write-Host "  - $host : back online; verifying domain status..."
+            Write-Host "  - $hostName : back online; verifying domain status..."
             $verify = ssh -o ConnectTimeout=10 "$sshUser@$ip" `
               "(Get-CimInstance Win32_ComputerSystem).Domain" 2>$null
             if ($verify -match '^nexus\.lab$') {
-              Write-Host "  - $host : domain=$verify (joined OK)"
+              Write-Host "  - $hostName : domain=$verify (joined OK)"
               break
             }
           }
           Start-Sleep -Seconds 15
         }
         if ((Get-Date) -ge $deadline) {
-          throw "[sqlserver-domain-join] $host did not return after restart within 8 min"
+          throw "[sqlserver-domain-join] $hostName did not return after restart within 8 min"
         }
       }
 
       # ── Populate nexus-sql-cluster-members AD group from dc-nexus.
       Write-Host "[sqlserver-domain-join] adding 4 computer accounts to nexus-sql-cluster-members on $dcIp..."
-      $hostnames = ($nodes.Keys | ForEach-Object { "'$_$'" }) -join ','
+      $hostNamenames = ($nodes.Keys | ForEach-Object { "'$_$'" }) -join ','
       $remoteAd = @"
 Import-Module ActiveDirectory;
-`$members = @($hostnames);
+`$members = @($hostNamenames);
 foreach (`$m in `$members) {
   try {
     Add-ADGroupMember -Identity 'nexus-sql-cluster-members' -Members `$m -ErrorAction Stop;

@@ -37,7 +37,7 @@ resource "null_resource" "sqlserver_nftables_backplane" {
       Write-Host "[sqlserver-nftables] waiting for all 4 SQL nodes' OpenSSH to respond + firstboot to complete..."
 
       foreach ($entry in $nodes.GetEnumerator()) {
-        $host = $entry.Key
+        $hostName = $entry.Key
         $ip   = $entry.Value.vmnet11
         $deadline = (Get-Date).AddMinutes(25)
         while ((Get-Date) -lt $deadline) {
@@ -49,13 +49,13 @@ resource "null_resource" "sqlserver_nftables_backplane" {
             "$sshUser@$ip" `
             "if (Test-Path 'C:/ProgramData/nexus/sql/node-identity.env') { Write-Output 'READY' } else { Write-Output 'WAIT' }" 2>$null
           if ($probe -match 'READY') {
-            Write-Host "  - $host ($ip) : ready"
+            Write-Host "  - $hostName ($ip) : ready"
             break
           }
           Start-Sleep -Seconds 10
         }
         if ((Get-Date) -ge $deadline) {
-          throw "[sqlserver-nftables] $host ($ip) did not reach READY within 25 min; firstboot may have failed -- ssh nexusadmin@$ip + Get-Content C:/ProgramData/nexus/sql/logs/firstboot.log"
+          throw "[sqlserver-nftables] $hostName ($ip) did not reach READY within 25 min; firstboot may have failed -- ssh nexusadmin@$ip + Get-Content C:/ProgramData/nexus/sql/logs/firstboot.log"
         }
       }
 
@@ -64,16 +64,16 @@ resource "null_resource" "sqlserver_nftables_backplane" {
       Write-Host "[sqlserver-nftables] verifying Win Firewall rules on all 4 nodes..."
       $expectedRules = @('NEXUS-SQL-1433-TCP', 'NEXUS-SQL-5022-TCP', 'NEXUS-WSFC-3343-UDP', 'NEXUS-WSFC-EPHEMERAL')
       foreach ($entry in $nodes.GetEnumerator()) {
-        $host = $entry.Key
+        $hostName = $entry.Key
         $ip   = $entry.Value.vmnet11
         foreach ($rule in $expectedRules) {
           $check = ssh -o ConnectTimeout=10 -o BatchMode=yes "$sshUser@$ip" `
             "if (Get-NetFirewallRule -Name '$rule' -ErrorAction SilentlyContinue) { Write-Output 'PRESENT' } else { Write-Output 'MISSING' }" 2>$null
           if ($check -notmatch 'PRESENT') {
-            throw "[sqlserver-nftables] $host : firewall rule $rule MISSING (Packer baked it; clone integrity issue?)"
+            throw "[sqlserver-nftables] $hostName : firewall rule $rule MISSING (Packer baked it; clone integrity issue?)"
           }
         }
-        Write-Host "  - $host : 4 critical firewall rules present"
+        Write-Host "  - $hostName : 4 critical firewall rules present"
       }
 
       Write-Host "[sqlserver-nftables] all 4 nodes ready; firewall rules verified"

@@ -33,7 +33,7 @@ resource "null_resource" "sqlserver_tls" {
     when        = create
     interpreter = ["pwsh", "-NoProfile", "-Command"]
     command     = <<-PWSH
-      $host      = '${each.key}'
+      $hostName      = '${each.key}'
       $ip        = '${each.value.vmnet11}'
       $role      = '${each.value.role}'
       $vmnet10   = '${each.value.vmnet10}'
@@ -42,15 +42,15 @@ resource "null_resource" "sqlserver_tls" {
       $fciVip    = '${local.fci_virtual_ip}'
       $listenerVip = '${local.ag_listener_ip}'
 
-      Write-Host "[sqlserver-tls] rendering mTLS cert for $host ($role)..."
+      Write-Host "[sqlserver-tls] rendering mTLS cert for $hostName ($role)..."
 
       # SAN lists differ by role. FCI nodes carry the FCI virtual hostname
       # + IP in their cert; AG-replicas do not. All 4 get the listener cert
       # rendered to a separate dir.
       $sanList = if ($role -eq 'fci') {
-        "$host,$host.nexus.lab,$host.sqlserver.nexus.lab,sql-fci-cluster,sql-fci-cluster.nexus.lab,localhost"
+        "$hostName,$hostName.nexus.lab,$hostName.sqlserver.nexus.lab,sql-fci-cluster,sql-fci-cluster.nexus.lab,localhost"
       } else {
-        "$host,$host.nexus.lab,$host.sqlserver.nexus.lab,localhost"
+        "$hostName,$hostName.nexus.lab,$hostName.sqlserver.nexus.lab,localhost"
       }
       $ipSanList = if ($role -eq 'fci') {
         "$ip,$vmnet10,127.0.0.1,$fciVip"
@@ -62,7 +62,7 @@ resource "null_resource" "sqlserver_tls" {
       # an agent re-read by `nexus-vault-agent` restart. The agent issues
       # the cert via pki_int/issue/$pkiRole + writes to the destination.
       $perNodeTemplate = @"
-{{ with secret "pki_int/issue/$pkiRole" "common_name=$host.sqlserver.nexus.lab" "alt_names=$sanList" "ip_sans=$ipSanList" "ttl=2160h" }}
+{{ with secret "pki_int/issue/$pkiRole" "common_name=$hostName.sqlserver.nexus.lab" "alt_names=$sanList" "ip_sans=$ipSanList" "ttl=2160h" }}
 {{ .Data.certificate }}
 {{ .Data.private_key }}
 {{ .Data.issuing_ca }}
@@ -87,7 +87,7 @@ resource "null_resource" "sqlserver_tls" {
 `$hcl = Get-Content 'C:/ProgramData/nexus/vault-agent/agent.hcl' -Raw;
 if (`$hcl -notmatch 'node-cert.tpl') {
   `$append = @"
-template { source = "C:/ProgramData/nexus/vault-agent/templates/node-cert.tpl" destination = "C:/ProgramData/nexus/sql/tls/$host.pem" perms = "0640" }
+template { source = "C:/ProgramData/nexus/vault-agent/templates/node-cert.tpl" destination = "C:/ProgramData/nexus/sql/tls/$hostName.pem" perms = "0640" }
 template { source = "C:/ProgramData/nexus/vault-agent/templates/listener-cert.tpl" destination = "C:/ProgramData/nexus/sql/tls/listener.pem" perms = "0640" }
 "@;
   `$append | Add-Content 'C:/ProgramData/nexus/vault-agent/agent.hcl';
@@ -99,19 +99,19 @@ Start-Sleep -Seconds 15;
 # Wait for the cert PEMs to be rendered.
 `$deadline = (Get-Date).AddMinutes(2);
 while ((Get-Date) -lt `$deadline) {
-  if ((Test-Path 'C:/ProgramData/nexus/sql/tls/$host.pem') -and (Test-Path 'C:/ProgramData/nexus/sql/tls/listener.pem')) {
+  if ((Test-Path 'C:/ProgramData/nexus/sql/tls/$hostName.pem') -and (Test-Path 'C:/ProgramData/nexus/sql/tls/listener.pem')) {
     Write-Output 'CERTS_RENDERED';
     break;
   }
   Start-Sleep -Seconds 5;
 }
-if (-not (Test-Path 'C:/ProgramData/nexus/sql/tls/$host.pem')) { throw 'node cert not rendered in 2 min' }
+if (-not (Test-Path 'C:/ProgramData/nexus/sql/tls/$hostName.pem')) { throw 'node cert not rendered in 2 min' }
 
 # Import both certs into LocalMachine\My (SQL Server reads from cert store).
 # PEM bundles need to be split into cert + private key + converted to PFX
 # for Import-Certificate. Use openssl (baked into ws2025-desktop baseline)
 # if available; else fall back to certutil + .pfx round-trip.
-foreach (`$certName in @('$host', 'listener')) {
+foreach (`$certName in @('$hostName', 'listener')) {
   `$pem = "C:/ProgramData/nexus/sql/tls/`$certName.pem";
   `$pfx = "C:/ProgramData/nexus/sql/tls/`$certName.pfx";
   if (Get-Command openssl -ErrorAction SilentlyContinue) {
@@ -131,8 +131,8 @@ foreach (`$certName in @('$host', 'listener')) {
       $b64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($remote))
       $output = ssh -o ConnectTimeout=30 "$sshUser@$ip" "powershell -NoProfile -EncodedCommand $b64" 2>&1 | Out-String
       Write-Host $output.Trim()
-      if ($LASTEXITCODE -ne 0) { throw "[sqlserver-tls] $host : cert render failed (rc=$LASTEXITCODE)" }
-      Write-Host "[sqlserver-tls] $host : per-node + listener cert rendered + imported into LocalMachine\\My"
+      if ($LASTEXITCODE -ne 0) { throw "[sqlserver-tls] $hostName : cert render failed (rc=$LASTEXITCODE)" }
+      Write-Host "[sqlserver-tls] $hostName : per-node + listener cert rendered + imported into LocalMachine\\My"
     PWSH
   }
 }

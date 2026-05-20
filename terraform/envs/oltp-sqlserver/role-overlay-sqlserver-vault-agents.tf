@@ -38,12 +38,12 @@ resource "null_resource" "sqlserver_vault_agents" {
     when        = create
     interpreter = ["pwsh", "-NoProfile", "-Command"]
     command     = <<-PWSH
-      $host       = '${each.key}'
+      $hostName       = '${each.key}'
       $ip         = '${each.value.vmnet11}'
       $role       = '${each.value.role}'
       $sshUser    = '${var.ssh_username}'
       $sidecarDir = pathexpand('${local.vault_agent_sidecar_dir}')
-      $sidecar    = Join-Path $sidecarDir "vault-agent-oltp-sqlserver-$host.json"
+      $sidecar    = Join-Path $sidecarDir "vault-agent-oltp-sqlserver-$hostName.json"
       $caBundle   = pathexpand('${var.vault_ca_bundle_path}')
 
       if (-not (Test-Path $sidecar)) {
@@ -56,7 +56,7 @@ resource "null_resource" "sqlserver_vault_agents" {
       $cfg     = Get-Content $sidecar -Raw | ConvertFrom-Json
       $caCert  = Get-Content $caBundle -Raw
 
-      Write-Host "[sqlserver-vault-agents] installing nexus-vault-agent on $host ($ip; role=$role)..."
+      Write-Host "[sqlserver-vault-agents] installing nexus-vault-agent on $hostName ($ip; role=$role)..."
 
       # Build the agent config file (HCL). Vault Agent renders templates for
       # the 5 KV creds + 1 JSON pointer + per-host mTLS leaf cert. FCI nodes
@@ -167,11 +167,11 @@ Write-Output ('SERVICE_STATUS=' + `$status);
       $b64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($remote))
       $output = ssh -o ConnectTimeout=60 "$sshUser@$ip" "powershell -NoProfile -EncodedCommand $b64" 2>&1 | Out-String
       Write-Host $output.Trim()
-      if ($LASTEXITCODE -ne 0) { throw "[sqlserver-vault-agents] $host : Vault Agent install failed (rc=$LASTEXITCODE)" }
+      if ($LASTEXITCODE -ne 0) { throw "[sqlserver-vault-agents] $hostName : Vault Agent install failed (rc=$LASTEXITCODE)" }
       if ($output -notmatch 'SERVICE_STATUS=Running') {
-        throw "[sqlserver-vault-agents] $host : nexus-vault-agent service did not reach Running"
+        throw "[sqlserver-vault-agents] $hostName : nexus-vault-agent service did not reach Running"
       }
-      Write-Host "[sqlserver-vault-agents] $host : nexus-vault-agent running + GMSA installed locally"
+      Write-Host "[sqlserver-vault-agents] $hostName : nexus-vault-agent running + GMSA installed locally"
     PWSH
   }
 }
