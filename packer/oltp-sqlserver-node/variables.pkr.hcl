@@ -85,27 +85,27 @@ variable "ssh_timeout" {
 }
 
 variable "sql_iso_path" {
-  description = "Local path to the SQL Server 2022 Developer Edition ISO (MSDN-keyed per ADR-0144). The bake mounts this ISO at D: via vmrun's addAttach + extracts setup.exe + runs silent install. ISO lives in H:\\VMS\\ISO\\ per memory/project_iso_directory.md."
+  description = "Local path to the SQL Server 2025 Enterprise Developer Edition ISO (MSDN-keyed per ADR-0144). The bake mounts this ISO via Mount-DiskImage + extracts setup.exe + runs silent install. ISO lives in H:\\VMS\\ISO\\ per memory/project_iso_directory.md. Decision sealed 2026-05-20 -- SQL 2025 picked over 2022 to align with the WS2025 host OS + leverage newest AG sync-commit + columnstore + Iceberg query enhancements."
   type        = string
-  default     = "H:/VMS/ISO/SQLServer2022-x64-ENU-Dev.iso"
+  default     = "H:/VMS/ISO/SqlServer2025EnterpriseDeveloperEdition.iso"
 }
 
 variable "sql_iso_checksum" {
-  description = "SHA256 checksum of the SQL Server 2022 Developer Edition ISO. Lookup at https://www.microsoft.com/sql-server/sql-server-downloads or via Get-FileHash on the canonical MSDN-downloaded file. Format: 'sha256:<hex>'."
+  description = "SHA256 checksum of the SQL Server 2025 Enterprise Developer Edition ISO. Computed via Get-FileHash on the MSDN-downloaded file 2026-05-20. Format: 'sha256:<hex>'."
   type        = string
-  default     = "sha256:000000000000000000000000000000000000000000000000000000000000PLACEHOLDER"
+  default     = "sha256:f78f869d44e8c2cbf93be16ce6ea52dd811636f046ded29e7a74dd1352134851"
 }
 
 variable "sql_version" {
-  description = "SQL Server major version. 2022 is the current canon (Always On enhancements + RegisterAllProvidersIP for multi-subnet AG demos; 2025 release is too new for portfolio-grade stability)."
+  description = "SQL Server major version. 2025 is the current canon (Enterprise Developer Edition free + full feature set incl. AOAG sync-commit + columnstore + Iceberg lakehouse-native query). 2022 ISO also on disk as legacy fallback."
   type        = string
-  default     = "2022"
+  default     = "2025"
 }
 
 variable "sql_edition" {
-  description = "SQL Server edition. Developer (free, full Enterprise features) per ADR-0144. Set to 'Evaluation' for an alternate 180-day rearm-able install -- not the canon path."
+  description = "SQL Server edition. SQL 2025 ships as 'Enterprise' Developer Edition (Microsoft renamed the SKU; free for dev/test; full Enterprise features) per ADR-0144. Set to 'Evaluation' for an alternate 180-day rearm-able install -- not the canon path."
   type        = string
-  default     = "Developer"
+  default     = "Enterprise"
 }
 
 variable "sql_install_features" {

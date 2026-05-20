@@ -12,9 +12,12 @@
  *       * Windows Firewall baseline (per 03-nexus-firewall.ps1)
  *       * node_exporter for Prometheus (per 04-nexus-observability.ps1)
  *       * Windows baseline tweaks (per 05-windows-baseline.ps1)
- *   - SQL Server: 2022 Developer Edition (free, full Enterprise features
- *     incl. AlwaysOn AG synchronous-commit, encryption, columnstore).
- *     Per ADR-0144 (MSDN). Silent install via setup.exe.
+ *   - SQL Server: 2025 Enterprise Developer Edition (free for dev/test;
+ *     full Enterprise features incl. AlwaysOn AG sync-commit, encryption,
+ *     columnstore, Iceberg lakehouse-native query). Decision sealed
+ *     2026-05-20 -- SQL 2025 picked over 2022 to align with WS2025 OS +
+ *     leverage newest AG enhancements. Per ADR-0144 (MSDN). Silent
+ *     install via setup.exe.
  *   - Windows features added: Failover-Clustering, Multipath-IO,
  *     iSCSI-Initiator. Needed by the WSFC bootstrap (all 4 nodes) + FCI
  *     pair's iSCSI session against nexus-gateway.

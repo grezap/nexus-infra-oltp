@@ -136,9 +136,9 @@ foreach ($r in $fwRules) {
 Write-Host "=== 11-cluster-features: enabling SQL Server HADR (AlwaysOn) ==="
 
 Stop-Service -Name MSSQLSERVER -Force -ErrorAction SilentlyContinue
-# WMI namespace: ROOT\Microsoft\SqlServer\ComputerManagement16 (SQL 2022).
+# WMI namespace: ROOT\Microsoft\SqlServer\ComputerManagement17 (SQL 2022).
 # Locate the ServerSettings class instance + set IsHadrEnabled = true.
-$wmiNamespace = 'ROOT\Microsoft\SqlServer\ComputerManagement16'
+$wmiNamespace = 'ROOT\Microsoft\SqlServer\ComputerManagement17'
 try {
     $serverInstance = Get-CimInstance -Namespace $wmiNamespace `
         -ClassName ServerSettings `
@@ -147,14 +147,14 @@ try {
     Invoke-CimMethod -InputObject $serverInstance `
         -MethodName SetHadrServiceSetting `
         -Arguments @{ HadrEnabled = 1 } | Out-Null
-    Write-Host "  - HADR enabled via WMI (ROOT\Microsoft\SqlServer\ComputerManagement16)"
+    Write-Host "  - HADR enabled via WMI (ROOT\Microsoft\SqlServer\ComputerManagement17)"
 } catch {
     # WMI provider sometimes lags after install -- fallback to registry
     # edit (same effect). Reg path:
-    # HKLM\SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL16.MSSQLSERVER\MSSQLServer\HADR
+    # HKLM\SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL17.MSSQLSERVER\MSSQLServer\HADR
     # value name: HADR_Enabled (DWORD)
     Write-Host "  - WMI HADR enable failed ($($_.Exception.Message)); falling back to registry"
-    $regPath = 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL16.MSSQLSERVER\MSSQLServer\HADR'
+    $regPath = 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL17.MSSQLSERVER\MSSQLServer\HADR'
     if (-not (Test-Path $regPath)) {
         New-Item -Path $regPath -Force | Out-Null
     }

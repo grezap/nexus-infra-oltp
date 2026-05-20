@@ -1,4 +1,4 @@
-# 10-sql-install.ps1 -- SQL Server 2022 Developer Edition silent install.
+# 10-sql-install.ps1 -- SQL Server 2025 Enterprise Developer Edition silent install.
 #
 # Inputs (environment vars, set by Packer's powershell provisioner):
 #   NEXUS_SQL_VERSION   = '2022'  (informational; not actually used by
@@ -113,7 +113,7 @@ Write-Host "=== 10-sql-install: launching setup.exe (silent, ~18 min) ==="
 Write-Host "    Edition: $sqlEdition"
 Write-Host "    Features: $sqlFeatures"
 Write-Host "    Instance: $sqlInstance"
-Write-Host "    (Logs land at C:\Program Files\Microsoft SQL Server\160\Setup Bootstrap\Log\)"
+Write-Host "    (Logs land at C:\Program Files\Microsoft SQL Server\170\Setup Bootstrap\Log\)"
 
 $proc = Start-Process -FilePath $setupExe -ArgumentList $setupArgs `
     -Wait -PassThru -NoNewWindow
@@ -125,7 +125,7 @@ $exitCode = $proc.ExitCode
 # anyway.
 if ($exitCode -ne 0 -and $exitCode -ne 3010) {
     # Try to surface the most recent setup log path for debugging.
-    $logRoot = 'C:\Program Files\Microsoft SQL Server\160\Setup Bootstrap\Log'
+    $logRoot = 'C:\Program Files\Microsoft SQL Server\170\Setup Bootstrap\Log'
     if (Test-Path $logRoot) {
         $latest = Get-ChildItem $logRoot -Directory | Sort-Object LastWriteTime -Descending | Select-Object -First 1
         Write-Host "ERROR: setup.exe exited $exitCode -- latest log dir: $($latest.FullName)"
