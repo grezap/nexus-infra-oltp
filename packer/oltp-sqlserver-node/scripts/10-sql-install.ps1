@@ -117,8 +117,6 @@ Write-Host "=== 10-sql-install: ISO mounted at ${driveLetter}: ; setup.exe at $s
 #     need a different collation; this matches what most SSMS-clicked
 #     installs land on.
 
-$bakePlaceholderSaPwd = 'NexusBake_OnlyForInstall_RotatedByTerraform_2026'
-
 $setupArgs = @(
     "/Q"
     "/ACTION=Install"
@@ -126,19 +124,23 @@ $setupArgs = @(
     "/INSTANCENAME=$sqlInstance"
     "/SQLSVCACCOUNT=`"NT AUTHORITY\NETWORK SERVICE`""
     "/SQLSYSADMINACCOUNTS=`"BUILTIN\Administrators`""
-    "/SECURITYMODE=SQL"
-    "/SAPWD=`"$bakePlaceholderSaPwd`""
+    # NOTE -- /SECURITYMODE=SQL + /SAPWD INTENTIONALLY OMITTED at bake time.
+    # Transient #15 at 0.G.7 ratify 2026-05-20: SQL 2025 setup.exe failed
+    # at FinalCalculateSettings with `System.Security.Cryptography.
+    # CryptographicException @ -2147024891 (0x80070005 ACCESS_DENIED)` --
+    # SQL 2025 uses CNG providers to encrypt the SA password into the
+    # ConfigurationFile.ini, and the CNG operation needs TPM-backed key
+    # storage which VMware Workstation 25 doesn't expose at bake time.
+    # Fix: install with Windows auth only at bake; SA password gets set
+    # later via T-SQL by terraform's role-overlay-fci-install.tf using
+    # the KV-seeded sa-password at apply time. SA is enabled then.
     "/TCPENABLED=1"
     "/NPENABLED=0"
     "/UPDATEENABLED=0"
     "/SQLCOLLATION=SQL_Latin1_General_CP1_CI_AS"
     "/IACCEPTSQLSERVERLICENSETERMS"
     # SQL Server 2025-specific required args (transient #14 at 0.G.7 ratify
-    # 2026-05-20). SQL 2025 made memory limits mandatory at install time +
-    # added Azure Arc/Software-Assurance opt-out flags. Missing these
-    # surfaces as `0x84B40001 "There was an error generating the XML
-    # document"` -- SQL Setup's catch-all for CLI args it can't marshal
-    # into its internal ConfigurationFile.ini.
+    # 2026-05-20). Memory limits mandatory + Software-Assurance opt-out.
     "/USESQLRECOMMENDEDMEMORYLIMITS=true"
     "/PRODUCTCOVEREDBYSA=False"
 ) -join ' '
