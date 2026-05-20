@@ -255,10 +255,11 @@ build {
       # = H:/VMS/ISO. The basename of the ISO becomes the URL path.
       # Transient #12 at 0.G.7 ratify 2026-05-20: legacy `{{ .HTTPIP }}` Go-
       # template syntax is JSON-template-only -- silently renders as
-      # literal "<no value>" in HCL2. HCL2 syntax is `${build.HTTPIP}` +
-      # `${build.HTTPPort}` (Packer injects the `build` var into provisioner
-      # blocks at apply time).
-      "NEXUS_ISO_URL=http://${build.HTTPIP}:${build.HTTPPort}/SqlServer2025EnterpriseDeveloperEdition.iso",
+      # literal "<no value>" in HCL2.
+      # Transient #13 (same iteration): the HCL2 attribute is NOT
+      # `build.HTTPIP` -- it's `build.PackerHTTPIP` (the "Packer" prefix
+      # is required). Same for PackerHTTPPort.
+      "NEXUS_ISO_URL=http://${build.PackerHTTPIP}:${build.PackerHTTPPort}/SqlServer2025EnterpriseDeveloperEdition.iso",
     ]
   }
 
