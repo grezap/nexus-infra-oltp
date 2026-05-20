@@ -5,58 +5,51 @@
  *   sql-fci-1, sql-fci-2 -- WSFC FCI pair sharing iSCSI LUN at .70.16
  *   sql-ag-rep-1, sql-ag-rep-2 -- AG async replicas (local storage)
  *
- *   - OS: Windows Server 2025 Desktop Experience -- cloned from the
- *     ws2025-desktop.vmx baked by nexus-infra-vmware Phase 0.B.5. Inherits:
- *       * OpenSSH server + nexusadmin authorized_keys (per
- *         _shared/powershell/scripts/01-nexus-identity.ps1)
- *       * Windows Firewall baseline (per 03-nexus-firewall.ps1)
- *       * node_exporter for Prometheus (per 04-nexus-observability.ps1)
- *       * Windows baseline tweaks (per 05-windows-baseline.ps1)
- *   - SQL Server: 2025 Enterprise Developer Edition (free for dev/test;
- *     full Enterprise features incl. AlwaysOn AG sync-commit, encryption,
- *     columnstore, Iceberg lakehouse-native query). Decision sealed
- *     2026-05-20 -- SQL 2025 picked over 2022 to align with WS2025 OS +
- *     leverage newest AG enhancements. Per ADR-0144 (MSDN). Silent
- *     install via setup.exe.
+ *   - OS: Windows Server 2025 Standard (Desktop Experience) -- built end-to-end
+ *     from ISO via vmware-iso. Mirrors nexus-infra-vmware/packer/ws2025-desktop
+ *     verbatim; the 5 shared baseline scripts are copied into
+ *     nexus-infra-oltp/packer/_shared/powershell/ (one-time DRY violation;
+ *     self-contained; matches the per-engine canon shape).
+ *   - SQL Server: 2025 Enterprise Developer Edition (free for dev/test; full
+ *     Enterprise features incl. AlwaysOn AG sync-commit, encryption,
+ *     columnstore, Iceberg lakehouse-native query). Per ADR-0144 (MSDN).
+ *     Silent install via setup.exe. Decision sealed 2026-05-20.
  *   - Windows features added: Failover-Clustering, Multipath-IO,
- *     iSCSI-Initiator. Needed by the WSFC bootstrap (all 4 nodes) + FCI
- *     pair's iSCSI session against nexus-gateway.
- *   - Default RAM at bake time: 4 GB (per memory/feedback_prefer_less_memory.md).
- *     Steady-state per vms.yaml is 16 GB (FCI nodes) / 12 GB (AG replicas)
- *     -- set at clone time by terraform once modules/vm gains the
- *     memory_mb resize step (currently reserved-not-applied per
- *     modules/vm/README.md).
+ *     iSCSI-Initiator. Needed by WSFC bootstrap (all 4 nodes) + FCI pair's
+ *     iSCSI session against nexus-gateway.
+ *
+ * Why vmware-iso (not vmware-vmx clone-from-baked-ws2025-desktop):
+ *   The vmware-vmx clone approach (initial 0.G.7 scaffold attempt) hit a wall
+ *   at ratify-time -- Packer's vmware-vmx builder doesn't auto-add NICs the
+ *   way vmware-iso does, and the source ws2025-desktop.vmx is baked with
+ *   vmx_remove_ethernet_interfaces=true so the clone had ZERO NICs -> no IP
+ *   -> 30:30 SSH timeout. Even vmx_data NIC injection didn't survive the
+ *   clone+sysprep+OOBE chain. The vmware-vmx pattern works for terraform/
+ *   modules/vm (vmrun clone + configure-vm-nic.ps1 + power on) but NOT for
+ *   Packer's pipeline. Transient #8 at 0.G.7 ratify 2026-05-20 -- pivoted to
+ *   vmware-iso 2026-05-20 (~3-4h rewrite).
  *
  * Build-time vs clone-time vs first-boot:
- *   - Build-time (this template): vmware-vmx clone of ws2025-desktop.vmx,
- *     boot through OOBE (sysprep-rendered unattend.xml), SSH in as
- *     nexusadmin, run 3 provisioners (SQL install, cluster features,
- *     firstboot stage), sysprep again, shutdown. Template artifact lands
- *     at H:/VMS/NexusPlatform/_templates/oltp-sqlserver-node/.
- *   - Clone-time (terraform/modules/vm): clone the .vmx; modules/vm needs
- *     the Windows path extension (added at Phase 0.G.7 stage 5) to wait
- *     for SSH instead of cloud-init firstboot marker.
- *   - First-boot (C:\\ProgramData\\nexus\\sql\\firstboot.ps1, staged by this
- *     template's 12-firstboot-stage.ps1): MAC-OUI-byte-5 NIC discovery +
- *     IP-to-hostname mapping (cluster=sqlserver; writes node-identity.env
- *     + computes whether this node is sql-fci-1/2/sql-ag-rep-1/2 from its
- *     VMnet11 IP). Runs as a scheduled task on first OOBE boot only.
- *   - Cluster bring-up (terraform/envs/oltp-sqlserver/role-overlay-*.tf):
- *     sqlserver-nftables-backplane -> sqlserver-domain-join ->
- *     sqlserver-vault-agents -> sqlserver-tls -> iscsi-attach (FCI only)
- *     -> wsfc-bootstrap -> fci-install (FCI only) -> ag-bootstrap ->
- *     ag-listener. See nexus-infra-oltp/docs/handbook.md §1.2 for the full
- *     cross-env operator order.
+ *   - Build-time (this template): vmware-iso install of WS2025 from ISO,
+ *     Autounattend-automated OOBE, 5 shared Nexus baseline scripts (identity
+ *     +network+firewall+observability+windows-baseline), 3 SQL-specific
+ *     provisioners (sql-install + cluster-features + firstboot-stage), then
+ *     99-sysprep /generalize /oobe /shutdown. Output:
+ *     H:/VMS/NexusPlatform/_templates/oltp-sqlserver-node/oltp-sqlserver-node.vmx
+ *   - Clone-time (terraform/modules/vm): vmrun clone + configure-vm-nic.ps1
+ *     adds dual-NIC (VMnet11 + VMnet10) post-clone -- exactly like dc-nexus
+ *     and the jumpbox.
+ *   - First-boot (C:\ProgramData\nexus\sql\firstboot.ps1 + NexusSqlFirstboot
+ *     scheduled task -- staged by 12-firstboot-stage.ps1): MAC-OUI-byte-5
+ *     NIC discovery + IP-to-hostname mapping + computer rename + VMnet10
+ *     static IP.
  *
  * Build:   cd packer/oltp-sqlserver-node; packer init .; packer build .
- * Spot-check (after bake completes):
- *   vmrun start <output_dir>/oltp-sqlserver-node.vmx nogui
- *   ssh nexusadmin@<dhcp-IP>  # password: nexus-packer-build-only
- *   Get-Service MSSQLSERVER          # -> Running (DISABLED at clone time)
- *   sqlcmd -E -Q "SELECT @@VERSION"  # -> 2022 Developer
- *   Get-WindowsFeature Failover-Clustering,Multipath-IO,iSCSI-Initiator  # all Installed
+ * Bake time: ~60 min real-time (WS install ~25 min + baseline ~10 min +
+ *   SQL install ~18 min + cluster features ~5 min + sysprep ~2 min).
  *
- * See: nexus-infra-oltp/docs/handbook.md §1.1 for the build matrix.
+ * See: nexus-infra-oltp/docs/handbook.md §1.1 + §3.5 for the build matrix
+ *      + the transient chronology (12 transients during 0.G.7 ratify).
  */
 
 packer {
@@ -69,94 +62,162 @@ packer {
   }
 }
 
-source "vmware-vmx" "oltp-sqlserver-node" {
+# ─── Derived locals: ISO + image + product key per product_source ─────────
+# Same product_source contract as ws2025-desktop:
+#   product_source = "evaluation" -> "Windows Server 2025 Standard Evaluation (Desktop Experience)"
+#   product_source = "msdn"        -> "Windows Server 2025 Standard (Desktop Experience)"
+locals {
+  iso_path = (
+    var.product_source == "msdn"
+    ? var.iso_path_msdn
+    : var.iso_path_evaluation
+  )
+
+  iso_checksum = (
+    var.product_source == "msdn"
+    ? var.iso_checksum_msdn
+    : var.iso_checksum_evaluation
+  )
+
+  image_name = (
+    var.product_source == "msdn"
+    ? "Windows Server 2025 Standard (Desktop Experience)"
+    : "Windows Server 2025 Standard Evaluation (Desktop Experience)"
+  )
+
+  # bootstrap_keys_file is a pre-Phase-0.D fallback JSON shape (same as
+  # ws2025-desktop's). MSDN key landed here under the "ws2025-desktop" key
+  # since this template reuses the WS2025 Desktop install.wim image.
+  product_key = (
+    var.product_source == "evaluation"
+    ? ""
+    : var.bootstrap_keys_file != ""
+    ? jsondecode(file(var.bootstrap_keys_file))["ws2025-desktop"]["key"]
+    : ""
+  )
+
+  # Render the Autounattend.xml from the shared template (same one ws2025-
+  # desktop uses; copied into nexus-infra-oltp/packer/_shared/powershell/
+  # floppy/ during the 0.G.7 ratify pivot 2026-05-20).
+  autounattend_xml = templatefile("${path.root}/../_shared/powershell/floppy/Autounattend.xml.tpl", {
+    image_name          = local.image_name
+    product_key         = local.product_key
+    admin_username      = var.admin_username
+    admin_password      = var.admin_password
+    computer_name       = var.vm_name
+    bypass_win11_checks = false
+  })
+}
+
+# ─── Source: WS2025 (Desktop Experience), VMware Workstation builder ─────
+source "vmware-iso" "oltp_sqlserver_node" {
   vm_name          = var.vm_name
   output_directory = var.output_directory
 
-  # Clone from the ws2025-desktop.vmx baked at Phase 0.B.5. The source VMX
-  # is sysprep'd (generalize /oobe /shutdown) -- our boot here runs through
-  # mini-OOBE which consumes the unattend.xml left in C:\\Windows\\System32\\
-  # Sysprep\\unattend.xml by the source bake's 99-sysprep step. That unattend
-  # reapplies the nexusadmin Local Administrator password (from the source
-  # bake's env vars), so our SSH/WinRM connection lands as nexusadmin with
-  # the known password.
-  source_path = var.source_vmx
-  linked      = false # full clone -- avoids dependency on the source VMX
-  # at clone time + keeps the per-engine template
-  # standalone for the per-cluster apply.
+  iso_url      = local.iso_path
+  iso_checksum = local.iso_checksum
 
-  vmx_data = {
-    "annotation"           = "oltp-sqlserver-node template (Phase 0.G.7) -- built by Packer; SQL Server ${var.sql_version} ${var.sql_edition} + Failover-Clustering + Multipath-IO + iSCSI-Initiator on top of ws2025-desktop"
-    "tools.upgrade.policy" = "useGlobal"
-    # Packer HCL2 has no tostring() function (Terraform does; Packer doesn't).
-    # Use ${} interpolation which converts number -> string. Transient #7 at
-    # 0.G.7 ratify 2026-05-20.
-    "memsize"  = "${var.memory_mb}"
-    "numvcpus" = "${var.cpus}"
+  guest_os_type = "windows2022srv-64"
+  cpus          = var.cpus
+  memory        = var.memory_mb
+  disk_size     = var.disk_gb * 1024
+  disk_type_id  = 0
+  # WS2025 WinPE has no PVSCSI driver in-box -- same constraint as ws2025-desktop.
+  disk_adapter_type = "lsisas1068"
 
-    # Transient #8 at 0.G.7 ratify: source ws2025-desktop.vmx was baked with
-    # vmx_remove_ethernet_interfaces=true so the cloned VM had ZERO NICs ->
-    # no IP -> Packer SSH timed out at 30:30. The vmware-vmx builder does
-    # NOT auto-add NICs like vmware-iso does. Add a build-time NAT NIC via
-    # vmx_data so the OOBE-completed VM can reach DHCP + Packer can find it
-    # via VMware Tools' IP report.
-    "ethernet0.present"        = "TRUE"
-    "ethernet0.connectionType" = "nat"
-    "ethernet0.virtualDev"     = "e1000e"
-    "ethernet0.addressType"    = "generated"
-    "ethernet0.startConnected" = "TRUE"
+  network_adapter_type = "e1000e"
+  network              = "nat"
+
+  version  = "20"
+  firmware = "efi"
+
+  floppy_content = {
+    "Autounattend.xml" = local.autounattend_xml
   }
+  floppy_files = [
+    "../_shared/powershell/scripts/bootstrap-winrm.ps1"
+  ]
 
-  # Strip the build-time NIC from the OUTPUT VMX so terraform/modules/vm's
-  # configure-vm-nic.ps1 can add the dual-NIC config at clone time (VMnet11
-  # + VMnet10) per the canon pattern. Same as ws2025-desktop's bake.
+  # Same EFI Boot Manager -> CDROM nav as ws2025-desktop; WS2025 ISOs behave
+  # identically across editions.
+  boot_wait = "90s"
+  boot_command = [
+    "<down><down><enter>",
+    "<wait3><spacebar>",
+    "<wait5><enter>",
+  ]
+
+  communicator   = "winrm"
+  winrm_username = var.admin_username
+  winrm_password = var.admin_password
+  winrm_insecure = true
+  winrm_use_ssl  = false
+  winrm_timeout  = var.winrm_timeout
+  winrm_port     = 5985
+
+  shutdown_command = "powershell -NoProfile -Command \"Write-Host 'sysprep handled shutdown; waiting'\""
+  shutdown_timeout = "30m"
+
+  headless = true
+
+  tools_mode        = "attach"
+  tools_source_path = "C:/Program Files (x86)/VMware/VMware Workstation/windows.iso"
+
   vmx_remove_ethernet_interfaces = true
 
-  # OOBE completes within ~3-5 min after power-on; SSH provisioner waits.
-  # The source's 01-nexus-identity.ps1 auto-starts sshd + injects
-  # nexusadmin's authorized_keys, so SSH-with-password is available as a
-  # fallback once the service starts. Communicator is SSH (matches the
-  # ADR-0024 SSH-shell-out invariant for runtime ops -- WinRM is bake-time
-  # only and is torn down at sysprep).
-  communicator = "ssh"
-  ssh_username = var.admin_username
-  ssh_password = var.admin_password
-  ssh_timeout  = var.ssh_timeout
-  ssh_pty      = false # Windows OpenSSH doesn't need PTY allocation.
-
-  shutdown_command = "shutdown /s /t 5 /f /d p:4:1 /c \"oltp-sqlserver-node bake complete -- packer shutdown\""
-  shutdown_timeout = "10m"
-
-  headless        = true
-  skip_compaction = false
+  vmx_data = {
+    "annotation"           = "oltp-sqlserver-node template (Phase 0.G.7) -- built by Packer; SQL Server ${var.sql_version} ${var.sql_edition} + Failover-Clustering + Multipath-IO + iSCSI-Initiator on top of WS2025 Desktop"
+    "tools.upgrade.policy" = "useGlobal"
+  }
 }
 
+# ─── Build: install OS + shared baseline + SQL + sysprep ──────────────────
 build {
   name    = "oltp-sqlserver-node"
-  sources = ["source.vmware-vmx.oltp-sqlserver-node"]
+  sources = ["source.vmware-iso.oltp_sqlserver_node"]
 
-  # ---------------------------------------------------------------------
-  # Stage 1: upload the SQL Server ISO to the guest. Packer's file
-  # provisioner uploads via SCP over the SSH session. ISO is ~3.5 GB so
-  # the upload takes ~2-3 min over local VMnet8 (NAT).
-  #
-  # Alternative considered: mounting the ISO as a CD at clone time via
-  # vmx_data \"sata0:0.fileName\" = var.sql_iso_path. Rejected because
-  # vmware-vmx's vmx_data merge happens BEFORE clone, but the source VMX
-  # already has a tools-iso attached -- adding our SQL ISO conflicts. The
-  # SCP upload approach is slower but isolates the per-engine layer.
-  # ---------------------------------------------------------------------
+  # ── Stage authorized_keys (shared file) ──
+  provisioner "file" {
+    source      = "../_shared/powershell/files/nexusadmin-authorized_keys"
+    destination = "C:/Windows/Temp/nexusadmin-authorized_keys"
+  }
+
+  # ── VMware Tools first ──
+  provisioner "powershell" {
+    scripts = [
+      "../_shared/powershell/scripts/00-install-vmware-tools.ps1"
+    ]
+  }
+  provisioner "windows-restart" {
+    restart_timeout = "15m"
+  }
+
+  # ── Shared Nexus baseline (same 5 scripts as ws2025-desktop) ──
+  provisioner "powershell" {
+    scripts = [
+      "../_shared/powershell/scripts/01-nexus-identity.ps1",
+      "../_shared/powershell/scripts/02-nexus-network.ps1",
+      "../_shared/powershell/scripts/03-nexus-firewall.ps1",
+      "../_shared/powershell/scripts/04-nexus-observability.ps1",
+      "../_shared/powershell/scripts/05-windows-baseline.ps1",
+    ]
+    environment_vars = [
+      "NEXUS_ADMIN_USERNAME=${var.admin_username}",
+      "NEXUS_TEMPLATE_NAME=${var.vm_name}",
+      "NEXUS_PHASE=0.G.7",
+    ]
+  }
+
+  # ── SQL Server 2025 Enterprise Developer silent install ──
+  # Stage 1: upload the SQL ISO to the guest. Packer's file provisioner
+  # uploads via the WinRM channel. ~1.2 GB for SQL 2025; takes ~2-3 min.
   provisioner "file" {
     source      = var.sql_iso_path
     destination = "C:/Windows/Temp/sqlserver.iso"
   }
 
-  # ---------------------------------------------------------------------
   # Stage 2: SQL Server silent install. Mounts the uploaded ISO via
-  # Mount-DiskImage, runs setup.exe with /Q /ACTION=Install /IACCEPT
-  # SQLSERVERLICENSETERMS, waits for completion, validates the engine
-  # responds to sqlcmd -E.
-  # ---------------------------------------------------------------------
+  # Mount-DiskImage, runs setup.exe /Q /ACTION=Install, verifies sqlcmd.
   provisioner "powershell" {
     scripts = [
       "scripts/10-sql-install.ps1"
@@ -170,12 +231,9 @@ build {
     ]
   }
 
-  # ---------------------------------------------------------------------
-  # Stage 3: WSFC + iSCSI Initiator + MPIO features. These Windows
-  # optional features need a restart to fully take effect; the
-  # windows-restart provisioner triggers the reboot + waits for the
-  # SSH service to come back.
-  # ---------------------------------------------------------------------
+  # Stage 3: WSFC + iSCSI Initiator + MPIO features + open SQL/cluster
+  # firewall ports + enable AlwaysOn HADR. Needs a Windows restart at the
+  # end (the 3 Windows features require it).
   provisioner "powershell" {
     scripts = [
       "scripts/11-cluster-features.ps1"
@@ -183,88 +241,38 @@ build {
   }
   provisioner "windows-restart" {
     restart_timeout = "15m"
-    # Default check command works for OpenSSH-reachable Windows; Packer
-    # waits for SSH to respond on :22 again.
   }
 
-  # ---------------------------------------------------------------------
-  # Stage 4: stage firstboot scripts at C:\\ProgramData\\nexus\\sql\\.
-  # The terraform/envs/oltp-sqlserver/role-overlay-*.tf overlays will
-  # invoke these scripts on the cloned VMs over SSH to do cluster-time
-  # work (TLS material render, WSFC bootstrap, AG creation, etc.).
-  # ---------------------------------------------------------------------
+  # Stage 4: stage firstboot scripts at C:/ProgramData/nexus/sql/. The
+  # terraform/envs/oltp-sqlserver/role-overlay-*.tf overlays will invoke
+  # these scripts on the cloned VMs over SSH at apply time.
   provisioner "powershell" {
     scripts = [
       "scripts/12-firstboot-stage.ps1"
     ]
   }
 
-  # ---------------------------------------------------------------------
-  # Stage 5: cleanup + re-sysprep.
-  # - Stop MSSQLSERVER service + set it to Manual (cluster bring-up
-  #   re-enables it after the GMSA service identity is set).
-  # - Wipe Temp + ISO upload.
-  # - Run sysprep /generalize /oobe /shutdown via the SAME deferred-task
-  #   pattern as ws2025-desktop's 99-sysprep.ps1, so that clones boot
-  #   through mini-OOBE + land as nexusadmin with the known password.
-  # The valid_exit_codes mirror ws2025-desktop -- sysprep emits non-zero
-  # under several harmless conditions (already-generalized component
-  # store, etc.) but Windows still completes the operation correctly.
-  # ---------------------------------------------------------------------
+  # Stage 5: cleanup + sysprep (shared 99-sysprep handles WinRM teardown +
+  # generalize). Same pattern as ws2025-desktop.
   provisioner "powershell" {
     inline = [
-      "# Stop SQL Server -- clones start it under the GMSA after WSFC bootstrap",
+      "# Stop SQL Server -- clones start it under GMSA after WSFC bootstrap",
       "Stop-Service -Name MSSQLSERVER -Force -ErrorAction SilentlyContinue",
       "Set-Service -Name MSSQLSERVER -StartupType Manual",
       "# Wipe staged ISO + Temp",
       "Remove-Item -Force -ErrorAction SilentlyContinue C:/Windows/Temp/sqlserver.iso",
       "Remove-Item -Recurse -Force -ErrorAction SilentlyContinue 'C:/Windows/Temp/*' -Exclude 'packer-*'",
       "Clear-DnsClientCache",
-      "Write-Host '=== oltp-sqlserver-node bake complete; deferring sysprep ==='"
-    ]
-    environment_vars = [
-      "NEXUS_ADMIN_USERNAME=${var.admin_username}",
-      "NEXUS_ADMIN_PASSWORD=${var.admin_password}",
+      "Write-Host '=== oltp-sqlserver-node bake complete; handing to 99-sysprep ==='"
     ]
   }
 
-  # Re-run the shared sysprep via Packer's powershell -- the deferred task
-  # pattern from ws2025-desktop's 99-sysprep is what actually fires the
-  # generalize. The script lives in the SOURCE repo (nexus-infra-vmware);
-  # we INLINE a simplified version here since the cross-repo path doesn't
-  # resolve in the CI checkout of nexus-infra-oltp. The simplified version
-  # writes the unattend.xml + schedules sysprep via Register-ScheduledTask.
+  # Shared sysprep (same script as ws2025-desktop). Tears down WinRM
+  # listener + clears event logs + sysprep /generalize /oobe /shutdown.
+  # Clones boot via mini-OOBE + land as nexusadmin with the known password.
   provisioner "powershell" {
-    inline = [
-      "$adminUser = $env:NEXUS_ADMIN_USERNAME",
-      "$adminPass = $env:NEXUS_ADMIN_PASSWORD",
-      "if (-not $adminUser -or -not $adminPass) { throw 'NEXUS_ADMIN_USERNAME/PASSWORD must be set for sysprep unattend' }",
-      "$unattend = @\"",
-      "<?xml version='1.0' encoding='utf-8'?>",
-      "<unattend xmlns='urn:schemas-microsoft-com:unattend' xmlns:wcm='http://schemas.microsoft.com/WMIConfig/2002/State'>",
-      "  <settings pass='oobeSystem'>",
-      "    <component name='Microsoft-Windows-Shell-Setup' processorArchitecture='amd64' publicKeyToken='31bf3856ad364e35' language='neutral' versionScope='nonSxS'>",
-      "      <OOBE>",
-      "        <HideEULAPage>true</HideEULAPage><HideLocalAccountScreen>true</HideLocalAccountScreen><HideOEMRegistrationScreen>true</HideOEMRegistrationScreen><HideOnlineAccountScreens>true</HideOnlineAccountScreens><HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>",
-      "        <NetworkLocation>Work</NetworkLocation><ProtectYourPC>3</ProtectYourPC><SkipMachineOOBE>true</SkipMachineOOBE><SkipUserOOBE>true</SkipUserOOBE>",
-      "      </OOBE>",
-      "      <UserAccounts><AdministratorPassword><Value>$adminPass</Value><PlainText>true</PlainText></AdministratorPassword><LocalAccounts><LocalAccount wcm:action='add'><Password><Value>$adminPass</Value><PlainText>true</PlainText></Password><Description>NexusPlatform admin</Description><DisplayName>$adminUser</DisplayName><Group>Administrators</Group><Name>$adminUser</Name></LocalAccount></LocalAccounts></UserAccounts>",
-      "      <TimeZone>UTC</TimeZone>",
-      "    </component>",
-      "    <component name='Microsoft-Windows-International-Core' processorArchitecture='amd64' publicKeyToken='31bf3856ad364e35' language='neutral' versionScope='nonSxS'><InputLocale>en-US</InputLocale><SystemLocale>en-US</SystemLocale><UILanguage>en-US</UILanguage><UserLocale>en-US</UserLocale></component>",
-      "  </settings>",
-      "</unattend>",
-      "\"@",
-      "$unattendPath = 'C:\\Windows\\System32\\Sysprep\\unattend.xml'",
-      "Set-Content -Path $unattendPath -Value $unattend -Encoding utf8",
-      "$deferredCmd = \"& '$env:WINDIR\\System32\\Sysprep\\sysprep.exe' /generalize /oobe /shutdown /quiet /unattend:'$unattendPath'\"",
-      "$encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($deferredCmd))",
-      "$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument \"-NoProfile -WindowStyle Hidden -EncodedCommand $encoded\"",
-      "$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(60)",
-      "$principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -RunLevel Highest -LogonType ServiceAccount",
-      "$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable",
-      "Register-ScheduledTask -TaskName 'NexusDeferredSysprep-SQL' -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null",
-      "Write-Host '=== oltp-sqlserver-node sysprep scheduled (T+60s); returning so Packer can drain ==='"
+    scripts = [
+      "../_shared/powershell/scripts/99-sysprep.ps1"
     ]
     environment_vars = [
       "NEXUS_ADMIN_USERNAME=${var.admin_username}",
