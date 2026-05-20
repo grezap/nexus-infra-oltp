@@ -201,9 +201,14 @@ Write-Host "  - firstboot.ps1 staged at $firstbootPath"
 # ---------------------------------------------------------------------
 $action = New-ScheduledTaskAction -Execute 'powershell.exe' `
     -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$firstbootPath`""
-# Trigger: AtLogon (any user). Mini-OOBE auto-logs in nexusadmin on first
-# boot post-sysprep, which fires this.
-$trigger = New-ScheduledTaskTrigger -AtLogOn
+# Trigger: AtStartup (not AtLogOn). The previous AtLogOn trigger required
+# an interactive user logon to fire -- but the shared 99-sysprep.ps1's
+# post-sysprep unattend doesn't include an <AutoLogon> block, so cloned
+# VMs sit at the lock screen after OOBE + the AtLogOn trigger never
+# fires + firstboot never runs. AtStartup fires when the OS boots
+# (before any user logon) + runs as SYSTEM. Transient #20 at 0.G.7
+# ratify 2026-05-21 (handbook §3.5b).
+$trigger = New-ScheduledTaskTrigger -AtStartup
 $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -RunLevel Highest -LogonType ServiceAccount
 $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
