@@ -176,9 +176,55 @@ Write-Host "    Features: $sqlFeatures"
 Write-Host "    Instance: $sqlInstance"
 Write-Host "    (Logs land at C:\Program Files\Microsoft SQL Server\170\Setup Bootstrap\Log\)"
 
-$proc = Start-Process -FilePath $setupExe -ArgumentList $setupArgs `
-    -Wait -PassThru -NoNewWindow
-$exitCode = $proc.ExitCode
+# Transient #16 confirmed: Packer's WinRM-spawned PS session has NO access
+# to the CurrentUser DPAPI scope ("Access is denied" on
+# ProtectedData.Protect). SQL Setup uses CurrentUser scope at
+# DataStoreService.SerializeObject -> hard fail at FinalCalculateSettings.
+# Fix: run setup.exe via a scheduled task as SYSTEM. SYSTEM has its own
+# DPAPI key container that's always accessible + this is the Microsoft-
+# documented workaround for SQL Setup over WinRM. The task fires once
+# immediately + we poll until completion + grab LastTaskResult for the
+# exit code. Standard pattern; same shape as the deferred-sysprep dance
+# in _shared/powershell/scripts/99-sysprep.ps1.
+$taskName = 'NexusSqlInstall'
+try { Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+
+$action    = New-ScheduledTaskAction -Execute $setupExe -Argument $setupArgs
+$trigger   = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(5)
+$principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -RunLevel Highest -LogonType ServiceAccount
+$settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+    -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 45)
+
+Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger `
+    -Principal $principal -Settings $settings -Force | Out-Null
+Start-ScheduledTask -TaskName $taskName
+
+Write-Host "    Scheduled task $taskName registered + started; waiting for completion (poll every 30s; cap at 45 min)..."
+$pollDeadline = (Get-Date).AddMinutes(45)
+$lastReportMinute = -1
+while ((Get-Date) -lt $pollDeadline) {
+    Start-Sleep -Seconds 30
+    $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+    if (-not $task) {
+        throw "Scheduled task $taskName disappeared mid-flight"
+    }
+    if ($task.State -ne 'Running') {
+        Write-Host "    Task state transitioned to: $($task.State)"
+        break
+    }
+    # Lightweight progress ticker so the bake log shows life every minute.
+    $elapsed = [int]((Get-Date) - (Get-ScheduledTaskInfo -TaskName $taskName).LastRunTime).TotalMinutes
+    if ($elapsed -ne $lastReportMinute) {
+        Write-Host "    [${elapsed}m] still running..."
+        $lastReportMinute = $elapsed
+    }
+}
+
+$info = Get-ScheduledTaskInfo -TaskName $taskName
+$exitCode = $info.LastTaskResult
+Write-Host "    Task LastTaskResult (exit code): $exitCode"
+
+Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
 
 # 0 = success; 3010 = success but reboot required (Windows feature
 # install + WMI provider). Treat 3010 as success here -- the next stage
