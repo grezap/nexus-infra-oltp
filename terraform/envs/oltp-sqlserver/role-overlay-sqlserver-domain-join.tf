@@ -72,9 +72,16 @@ resource "null_resource" "sqlserver_domain_join" {
         Write-Host "[sqlserver-domain-join] joining $hostName ($ip) to $adDomain..."
 
         # Idempotency probe: PartOfDomain skip.
+        # IMPORTANT: PS `-match` is a regex SUBSTRING match; `'NOTJOINED' -match
+        # 'JOINED'` returns True because 'JOINED' is contained inside 'NOTJOINED'.
+        # Transient #23 at 0.G.7 ratify 2026-05-21 -- the probe falsely reported
+        # all 4 unjoined nodes as JOINED, then Add-ADGroupMember failed because
+        # the computer accounts didn't exist. Use anchored regex `^JOINED\s*$`
+        # to ignore trailing CR/whitespace per feedback_pwsh_ssh_stdin_cr_
+        # injection.md + feedback_smoke_gate_probe_robustness.md.
         $probe = ssh -o ConnectTimeout=15 -o BatchMode=yes "$sshUser@$ip" `
           "if ((Get-CimInstance Win32_ComputerSystem).PartOfDomain) { Write-Output 'JOINED' } else { Write-Output 'NOTJOINED' }" 2>$null
-        if ($probe -match 'JOINED') {
+        if ($probe -match '^JOINED\s*$') {
           Write-Host "  - $hostName : already domain-joined (idempotent skip)"
           continue
         }
@@ -95,12 +102,12 @@ Add-Computer -DomainName '$adDomain' -Credential `$cred -Force -Restart -PassThr
         $deadline = (Get-Date).AddMinutes(8)
         while ((Get-Date) -lt $deadline) {
           $back = ssh -o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=no "$sshUser@$ip" "echo PONG" 2>$null
-          if ($back -match 'PONG') {
+          if ($back -match '^PONG\s*$') {
             Write-Host "  - $hostName : back online; verifying domain status..."
             $verify = ssh -o ConnectTimeout=10 "$sshUser@$ip" `
               "(Get-CimInstance Win32_ComputerSystem).Domain" 2>$null
-            if ($verify -match '^nexus\.lab$') {
-              Write-Host "  - $hostName : domain=$verify (joined OK)"
+            if ($verify -match '^nexus\.lab\s*$') {
+              Write-Host "  - $hostName : domain=$($verify.Trim()) (joined OK)"
               break
             }
           }
