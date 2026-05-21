@@ -183,6 +183,16 @@ Remove-Item `$scriptPath -ErrorAction SilentlyContinue;
 Start-Transcript -Path `$logPath -Force | Out-Null;
 `$svc = Get-CimInstance Win32_Service -Filter "Name='MSSQLSERVER'" -ErrorAction SilentlyContinue;
 if (-not `$svc) { Write-Output 'NO_STANDALONE'; Stop-Transcript | Out-Null; exit 0; }
+# Transient #28L at 0.G.7 ratify 2026-05-21: if MSSQLSERVER is already the
+# CLUSTERED FCI instance (SqlCluster=1 in the Setup registry), do NOT try to
+# uninstall it -- setup /ACTION=Uninstall on a clustered instance fails with
+# "The selected instance is clustered and cannot be removed ... use
+# /Action=RemoveNode". This is the idempotency case: a re-run after the FCI
+# is installed must LEAVE the FCI alone (only standalone instances get
+# uninstalled to make room for the FCI). Without this guard, every re-apply
+# tries to uninstall the live FCI on sql-fci-1 + fails.
+`$isClustered = (Get-ItemProperty 'HKLM:/SOFTWARE/Microsoft/Microsoft SQL Server/MSSQL17.MSSQLSERVER/Setup' -Name SqlCluster -ErrorAction SilentlyContinue).SqlCluster;
+if (`$isClustered -eq 1) { Write-Output 'ALREADY_CLUSTERED'; Stop-Transcript | Out-Null; exit 0; }
 if (-not (Test-Path 'C:/Windows/Temp/sqlserver.iso')) { Write-Output 'ISO_MISSING'; Stop-Transcript | Out-Null; exit 1; }
 Mount-DiskImage -ImagePath 'C:/Windows/Temp/sqlserver.iso' -ErrorAction SilentlyContinue | Out-Null;
 Start-Sleep -Seconds 5;
@@ -208,6 +218,8 @@ Stop-Transcript | Out-Null;
           Write-Host "[fci-install] Phase A: $($fciNode.Tag) back online post-reboot"
         } elseif ($uo -match 'NO_STANDALONE') {
           Write-Host "[fci-install] Phase A: $($fciNode.Tag) has no standalone instance (already clean)"
+        } elseif ($uo -match 'ALREADY_CLUSTERED') {
+          Write-Host "[fci-install] Phase A: $($fciNode.Tag) MSSQLSERVER is already the clustered FCI (leave it; idempotent skip)"
         } else {
           Write-Host $uo
           throw "[fci-install] Phase A: standalone uninstall failed on $($fciNode.Tag)"

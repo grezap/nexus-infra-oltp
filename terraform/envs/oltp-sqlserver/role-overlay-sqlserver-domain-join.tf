@@ -84,6 +84,26 @@ resource "null_resource" "sqlserver_domain_join" {
       foreach ($entry in $nodes.GetEnumerator()) {
         $hostName = $entry.Key
         $ip   = $entry.Value.vmnet11
+
+        # ── Point the node at dc-nexus (AD DNS) BEFORE joining + for all
+        #    subsequent ops. Transient #27d/#28k at 0.G.7 ratify 2026-05-21:
+        #    the gateway dnsmasq (.1, the DHCP-issued DNS) is authoritative
+        #    for nexus.local + does NOT forward nexus.lab AD queries to
+        #    dc-nexus -- so domain-joined nodes couldn't resolve each other's
+        #    nexus.lab names, the AD SRV records needed for join, OR the FCI/
+        #    Listener virtual names that the cluster registers in AD DNS.
+        #    The standard AD-member fix: use dc-nexus (.240) as PRIMARY DNS +
+        #    the gateway (.1) as SECONDARY (external forwarding fallback).
+        #    Idempotent + applied to every node every apply (cheap; survives
+        #    DHCP renewals because static server addresses override DHCP).
+        #    This is the zero-blast-radius fix -- it touches only the SQL
+        #    nodes, never the fleet-wide gateway dnsmasq (which other,
+        #    non-domain clusters still rely on for nexus.local).
+        $dnsSet = "Set-DnsClientServerAddress -InterfaceAlias 'Ethernet0' -ServerAddresses ('${var.ad_dc_ip}','192.168.70.1'); ipconfig /registerdns | Out-Null; Clear-DnsClientCache"
+        $dnsB64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($dnsSet))
+        ssh -o ConnectTimeout=15 -o BatchMode=yes "$sshUser@$ip" "powershell -NoProfile -EncodedCommand $dnsB64" 2>$null | Out-Null
+        Write-Host "  - $hostName : DNS -> dc-nexus(${var.ad_dc_ip}) primary + gateway secondary"
+
         Write-Host "[sqlserver-domain-join] joining $hostName ($ip) to $adDomain..."
 
         # Idempotency probe: PartOfDomain skip.
