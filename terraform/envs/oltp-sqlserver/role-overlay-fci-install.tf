@@ -125,6 +125,64 @@ Remove-Item `$scriptPath -ErrorAction SilentlyContinue;
         return $out
       }
 
+      # ── Helper: wait for a node's SSH to return after a reboot.
+      function Wait-NodeBack {
+        param([string]$ip, [int]$timeoutMin = 8)
+        $deadline = (Get-Date).AddMinutes($timeoutMin)
+        while ((Get-Date) -lt $deadline) {
+          $back = ssh -o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=no "$sshUser@$ip" "echo PONG" 2>$null
+          if ($back -match '^PONG\s*$') { return $true }
+          Start-Sleep -Seconds 15
+        }
+        return $false
+      }
+
+      # ── Phase A (transient #28g at 0.G.7 ratify 2026-05-21): uninstall the
+      #    standalone MSSQLSERVER instance on BOTH FCI nodes + REBOOT. The
+      #    uninstall sets a pending-reboot flag; setup.exe InstallFailoverCluster
+      #    then aborts with error 3010 "A computer restart is required". So the
+      #    uninstall + reboot MUST complete before the FCI install runs. Done
+      #    as a domain-task (uninstall needs no domain context, but reuse the
+      #    pattern). Idempotent: skips if the standalone service is already gone.
+      $uninstallOrch = @"
+`$ErrorActionPreference = 'Continue';
+`$logPath = 'C:/Windows/Temp/fci-uninstall.log';
+Start-Transcript -Path `$logPath -Force | Out-Null;
+`$svc = Get-CimInstance Win32_Service -Filter "Name='MSSQLSERVER'" -ErrorAction SilentlyContinue;
+if (-not `$svc) { Write-Output 'NO_STANDALONE'; Stop-Transcript | Out-Null; exit 0; }
+if (-not (Test-Path 'C:/Windows/Temp/sqlserver.iso')) { Write-Output 'ISO_MISSING'; Stop-Transcript | Out-Null; exit 1; }
+Mount-DiskImage -ImagePath 'C:/Windows/Temp/sqlserver.iso' -ErrorAction SilentlyContinue | Out-Null;
+Start-Sleep -Seconds 5;
+`$isoVol = (Get-DiskImage -ImagePath 'C:/Windows/Temp/sqlserver.iso' | Get-Volume).DriveLetter;
+`$setupExe = `$isoVol + ':/setup.exe';
+Stop-Service -Name 'MSSQLSERVER' -Force -ErrorAction SilentlyContinue;
+& `$setupExe '/Q' '/ACTION=Uninstall' '/INSTANCENAME=MSSQLSERVER' '/FEATURES=SQLEngine,FullText' '/SUPPRESSPRIVACYSTATEMENTNOTICE';
+`$urc = `$LASTEXITCODE;
+Write-Output ('UNINSTALL_RC=' + `$urc);
+if (`$urc -eq 0 -or `$urc -eq 3010) { Write-Output 'STANDALONE_UNINSTALLED'; } else { Write-Output 'UNINSTALL_FAILED'; }
+Stop-Transcript | Out-Null;
+"@
+      foreach ($fciNode in @(@{Ip=$sf1Ip;Tag='sf1'}, @{Ip=$sf2Ip;Tag='sf2'})) {
+        Write-Host "[fci-install] Phase A: uninstall standalone on $($fciNode.Tag) ($($fciNode.Ip))..."
+        $uo = Invoke-AsDomainTask -ip $fciNode.Ip -tag "NexusFciUninstall$($fciNode.Tag)" -orchestrate $uninstallOrch -logFile 'C:/Windows/Temp/fci-uninstall.log' -timeoutMin 20
+        if ($uo -match 'STANDALONE_UNINSTALLED') {
+          Write-Host "[fci-install] Phase A: rebooting $($fciNode.Tag) to clear pending-reboot..."
+          ssh -o ConnectTimeout=10 "$sshUser@$($fciNode.Ip)" "shutdown /r /t 3 /c 'FCI uninstall reboot'" 2>&1 | Out-Null
+          Start-Sleep -Seconds 30
+          if (-not (Wait-NodeBack -ip $fciNode.Ip -timeoutMin 8)) {
+            throw "[fci-install] $($fciNode.Tag) did not return after uninstall reboot"
+          }
+          Write-Host "[fci-install] Phase A: $($fciNode.Tag) back online post-reboot"
+        } elseif ($uo -match 'NO_STANDALONE') {
+          Write-Host "[fci-install] Phase A: $($fciNode.Tag) has no standalone instance (already clean)"
+        } else {
+          Write-Host $uo
+          throw "[fci-install] Phase A: standalone uninstall failed on $($fciNode.Tag)"
+        }
+      }
+      # WSFC service may need a moment to re-stabilize after the FCI-node reboots.
+      Start-Sleep -Seconds 20
+
       Write-Host "[fci-install] step 1/2: InstallFailoverCluster on sql-fci-1 (via Scheduled Task as $adUser)..."
 
       # ── sql-fci-1: InstallFailoverCluster orchestrate.
@@ -158,24 +216,9 @@ try {
   `$setupExe = `$isoVol + ':/setup.exe';
   Write-Output ('SETUP_EXE=' + `$setupExe);
 
-  # Transient #28e at 0.G.7 ratify 2026-05-21: the Packer template installs
-  # a STANDALONE MSSQLSERVER instance on ALL 4 nodes (one shared template).
-  # InstallFailoverCluster with /INSTANCENAME=MSSQLSERVER cannot convert an
-  # existing standalone instance -- setup reports "Passed" but creates NO
-  # cluster resource (the instance stays Clustered=No). FCI nodes must have
-  # the standalone instance UNINSTALLED first so the FCI install creates a
-  # fresh clustered instance. (AG-replica nodes keep their standalone
-  # instance -- they participate in the AG as standalone, not FCI.)
-  `$standalone = Get-CimInstance Win32_Service -Filter "Name='MSSQLSERVER'" -ErrorAction SilentlyContinue;
-  if (`$standalone) {
-    Write-Output 'UNINSTALLING_STANDALONE_SF1...';
-    Stop-Service -Name 'MSSQLSERVER' -Force -ErrorAction SilentlyContinue;
-    & `$setupExe '/Q' '/ACTION=Uninstall' '/INSTANCENAME=MSSQLSERVER' '/FEATURES=SQLEngine,FullText' '/SUPPRESSPRIVACYSTATEMENTNOTICE';
-    `$urc = `$LASTEXITCODE;
-    Write-Output ('UNINSTALL_RC=' + `$urc);
-    if (`$urc -ne 0 -and `$urc -ne 3010) { throw ('standalone uninstall failed exit=' + `$urc); }
-    Start-Sleep -Seconds 10;
-  }
+  # NOTE: standalone-instance uninstall + reboot is handled by Phase A in the
+  # outer orchestration (transient #28e/#28g) -- by the time we reach here the
+  # FCI node has no standalone MSSQLSERVER + no pending reboot.
 
   # Resolve the cluster network whose subnet covers the FCI VIP (.70.x).
   # Transient #28c at 0.G.7 ratify 2026-05-21: WSFC auto-names networks
@@ -262,19 +305,7 @@ try {
   `$isoVol = (Get-DiskImage -ImagePath 'C:/Windows/Temp/sqlserver.iso' | Get-Volume).DriveLetter;
   `$setupExe = `$isoVol + ':/setup.exe';
 
-  # Transient #28e: uninstall the standalone MSSQLSERVER instance (from the
-  # Packer bake) before AddNode -- a pre-existing standalone instance with
-  # the same name blocks joining the FCI.
-  `$standalone = Get-CimInstance Win32_Service -Filter "Name='MSSQLSERVER'" -ErrorAction SilentlyContinue;
-  if (`$standalone) {
-    Write-Output 'UNINSTALLING_STANDALONE_SF2...';
-    Stop-Service -Name 'MSSQLSERVER' -Force -ErrorAction SilentlyContinue;
-    & `$setupExe '/Q' '/ACTION=Uninstall' '/INSTANCENAME=MSSQLSERVER' '/FEATURES=SQLEngine,FullText' '/SUPPRESSPRIVACYSTATEMENTNOTICE';
-    `$urc = `$LASTEXITCODE;
-    Write-Output ('UNINSTALL_RC=' + `$urc);
-    if (`$urc -ne 0 -and `$urc -ne 3010) { throw ('standalone uninstall failed exit=' + `$urc); }
-    Start-Sleep -Seconds 10;
-  }
+  # NOTE: standalone uninstall + reboot handled by Phase A (transient #28g).
 
   `$addArgs = @(
     '/Q', '/ACTION=AddNode',
