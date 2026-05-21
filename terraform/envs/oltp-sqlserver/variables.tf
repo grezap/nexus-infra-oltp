@@ -222,7 +222,7 @@ variable "sqlserver_vault_agents_v" {
 variable "sqlserver_tls_v" {
   description = "TLS material render overlay version. Bump to re-run."
   type        = string
-  default     = "1"
+  default     = "3"
 }
 variable "iscsi_attach_v" {
   description = "iSCSI attach overlay version. Bump to re-run."
@@ -247,5 +247,5 @@ variable "ag_bootstrap_v" {
 variable "ag_listener_v" {
   description = "AG Listener overlay version. Bump to re-run."
   type        = string
-  default     = "1"
+  default     = "3"
 }
