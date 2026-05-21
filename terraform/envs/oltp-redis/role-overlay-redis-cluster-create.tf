@@ -75,7 +75,7 @@ resource "null_resource" "redis_cluster_create" {
     ])
     cluster_node_args = local.redis_cluster_node_args
     bootstrap_ip      = local.redis_bootstrap_ip
-    cluster_create_v  = "1" # v1 (0.G.1) = initial probe-then-create + RF=2 cross-shard round-trip exit gate.
+    cluster_create_v  = "2" # v2 (0.G.7 fleet cold-rebuild audit 2026-05-22) = added Stage 1b orphan-master reconcile (transient #18 permanent fix). v1 = initial probe-then-create.
   }
 
   depends_on = [null_resource.redis_config]
@@ -115,6 +115,53 @@ resource "null_resource" "redis_cluster_create" {
           throw "[redis-cluster-create] cluster create did not report `[OK`] All 16384 slots covered."
         }
         Write-Host "[redis-cluster-create] cluster created (all 16384 slots covered)"
+      }
+
+      # ─── Stage 1b: orphan-master reconcile (transient #18, permanent fix) ─
+      # Redis 8.0.2's `redis-cli --cluster create --cluster-replicas 1` can
+      # silently leave all 6 nodes as masters (3 with slots + 3 orphan masters
+      # with no slots) -- cluster_state reports ok + 16384 slots covered, but
+      # the shape is 6 masters / 0 replicas. CHANGELOG #18 recorded the live
+      # recovery (SSH each orphan + CLUSTER REPLICATE <master-id>); this is the
+      # committed permanent fix. IDEMPOTENT: if the create already produced the
+      # correct 3+3 shape (no orphan masters), the reconcile finds zero orphans
+      # + is a no-op. Runs on every apply, safe on a healthy cluster.
+      # NOTE: this bash deliberately uses NO bash brace-parameter-expansion --
+      # that dollar-brace syntax collides with Terraform interpolation in the
+      # outer <<-PWSH heredoc (feedback_terraform_heredoc_powershell.md). Line
+      # selection via awk -v, field split via cut, indexing via $(( )).
+      $reconcile = @'
+set -euo pipefail
+TLS='--tls --cacert /etc/nexus-redis/tls/ca.crt --cert /etc/nexus-redis/tls/server.crt --key /etc/nexus-redis/tls/server.key'
+NODES=$(sudo redis-cli -h 127.0.0.1 -p 6379 $TLS cluster nodes 2>/dev/null)
+echo "$NODES" | awk '/master/ && NF>8  {print $1}'      > /tmp/redis_masters.txt
+echo "$NODES" | awk '/master/ && NF==8 {print $1" "$2}' > /tmp/redis_orphans.txt
+if [ ! -s /tmp/redis_orphans.txt ]; then
+  echo "REDIS_RECONCILE_OK: no orphan masters (shape already 3 masters + 3 replicas)"
+  rm -f /tmp/redis_masters.txt /tmp/redis_orphans.txt
+  exit 0
+fi
+MCOUNT=$(wc -l < /tmp/redis_masters.txt)
+n=0
+while read -r OID OADDR; do
+  [ -z "$OID" ] && continue
+  IDX=$(( n % MCOUNT + 1 ))
+  TARGET=$(awk -v k="$IDX" 'NR==k {print; exit}' /tmp/redis_masters.txt)
+  OHOST=$(printf '%s' "$OADDR" | cut -d@ -f1)
+  OIP=$(printf '%s' "$OHOST" | cut -d: -f1)
+  OPORT=$(printf '%s' "$OHOST" | cut -d: -f2)
+  echo "REDIS_RECONCILE: replicate orphan $OID ($OHOST) -> master $TARGET"
+  sudo redis-cli -h "$OIP" -p "$OPORT" $TLS CLUSTER REPLICATE "$TARGET" >/dev/null
+  n=$(( n + 1 ))
+done < /tmp/redis_orphans.txt
+rm -f /tmp/redis_masters.txt /tmp/redis_orphans.txt
+echo "REDIS_RECONCILE_DONE"
+'@
+      $reconcile = $reconcile -replace "`r`n", "`n"
+      $recOut = ($reconcile | ssh @sshOpts "$sshUser@$bootIp" "tr -d '\r' | bash -s" 2>&1 | Out-String)
+      Write-Host $recOut.Trim()
+      if ($recOut -notmatch 'REDIS_RECONCILE_OK' -and $recOut -notmatch 'REDIS_RECONCILE_DONE') {
+        throw "[redis-cluster-create] orphan-master reconcile did not complete cleanly"
       }
 
       # ─── Stage 2: wait for cluster health ────────────────────────────────
