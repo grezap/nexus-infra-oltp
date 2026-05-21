@@ -2,20 +2,31 @@
 #
 # Converts the standalone SQL Server install on sql-fci-1/2 into a 2-node
 # Failover Cluster Instance (FCI). Two-stage:
-#   1. On sql-fci-1: setup.exe /ACTION=InstallFailoverCluster. Reuses the
-#      already-installed binaries from the Packer bake; the action creates
-#      the FCI resource group in WSFC with the CSV as data dir, virtual
+#   1. On sql-fci-1: setup.exe /ACTION=InstallFailoverCluster. Creates the
+#      FCI resource group in WSFC with the cluster disk as data dir, virtual
 #      server name `sql-fci-cluster`, virtual server IP .70.16.
 #   2. On sql-fci-2: setup.exe /ACTION=AddNode. Joins the existing FCI as
 #      a possible owner.
 #
-# The original standalone MSSQLSERVER service on each node is removed by
-# /ACTION=InstallFailoverCluster (cluster-aware install replaces the
-# standalone instance with the FCI-aware one). SQL service identity moves
-# to nexus.lab\gmsa-sql-engine$.
+# SQL service identity = nexus.lab\gmsa-sql-engine$ (cached via
+# Install-ADServiceAccount in each orchestrate, since the standalone install
+# from the Packer bake used NETWORK SERVICE).
 #
-# Bootstrap SA password (the placeholder from 10-sql-install.ps1) is
-# rotated to the KV-seeded sa-password via T-SQL inside this stage.
+# DOMAIN-ADMIN CONTEXT: setup.exe needs cluster-admin rights (to create the
+# FCI resource in WSFC) + AD read (to validate /SQLSYSADMINACCOUNTS +
+# retrieve the GMSA). The Windows OpenSSH SSH session runs as LOCAL
+# nexusadmin (no Kerberos TGT, not a cluster admin). So -- exactly like
+# role-overlay-wsfc-bootstrap.tf -- we dispatch setup.exe as a Scheduled
+# Task running as NEXUS\nexusadmin (schtasks /Create /RU /RP = Password
+# logon type with full network credentials; transient #27/#28 at 0.G.7
+# ratify 2026-05-21).
+#
+# PRE-REQ: the SQL Server ISO must be present at C:/Windows/Temp/sqlserver.iso
+# on BOTH FCI nodes. The Packer bake removes the ISO post-install, so the
+# operator (or this overlay's caller) uploads it again before apply. The
+# RATIFY-0.G.7 runbook documents the scp step:
+#   scp H:/VMS/ISO/<sql>.iso nexusadmin@192.168.70.11:C:/Windows/Temp/sqlserver.iso
+#   scp H:/VMS/ISO/<sql>.iso nexusadmin@192.168.70.12:C:/Windows/Temp/sqlserver.iso
 
 resource "null_resource" "fci_install" {
   count = var.enable_fci_install ? 1 : 0
@@ -38,95 +49,190 @@ resource "null_resource" "fci_install" {
       $fciVip    = '${local.fci_virtual_ip}'
       $fciName   = '${local.fci_cluster_name}'
 
-      Write-Host "[fci-install] step 1/2: InstallFailoverCluster on sql-fci-1..."
+      # Domain creds for the schtasks Password-logon-type dispatch.
+      $adCredsJson = Join-Path $HOME ".nexus/nexusadmin-credentials.json"
+      if (-not (Test-Path $adCredsJson)) { throw "[fci-install] nexusadmin-credentials.json not found at $adCredsJson" }
+      $adCreds   = Get-Content $adCredsJson -Raw | ConvertFrom-Json
+      $adNetbios = if ($adCreds.PSObject.Properties['netbios']) { $adCreds.netbios } else { 'NEXUS' }
+      $adUser    = "$adNetbios\$($adCreds.username)"
+      $adPass    = $adCreds.password
 
-      # The ISO has been removed in the bake's cleanup stage; we re-mount
-      # it from the host's H:/VMS/ISO via vmrun mountedFolder + Mount-DiskImage.
-      # For simplicity in this scaffold we assume the ISO is uploaded again
-      # to C:/Windows/Temp/sqlserver.iso by an operator step or a follow-up
-      # script -- the live ratification will iron out the exact path.
+      # ── Helper: dispatch an orchestrate script to $ip as a Scheduled Task
+      #    running as NEXUS\nexusadmin (Password logon type), poll to
+      #    completion, return the transcript. Mirrors role-overlay-wsfc-
+      #    bootstrap.tf. $tag names the task + log + script paths.
+      function Invoke-AsDomainTask {
+        param([string]$ip, [string]$tag, [string]$orchestrate, [int]$timeoutMin = 30)
 
-      $sf1Remote = @"
+        $wrapper = @"
+`$ErrorActionPreference = 'Continue';
+`$scriptPath = 'C:/Windows/Temp/$tag-orchestrate.ps1';
+`$logPath = 'C:/Windows/Temp/$tag.log';
+Remove-Item `$logPath -ErrorAction SilentlyContinue;
+Remove-Item `$scriptPath -ErrorAction SilentlyContinue;
+@'
+$orchestrate
+'@ | Set-Content -Path `$scriptPath -Encoding UTF8;
+
+`$taskName = '$tag';
+try { schtasks /Delete /TN `$taskName /F 2>&1 | Out-Null } catch {};
+schtasks /Create /TN `$taskName /TR "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `$scriptPath" /SC ONCE /ST 23:59 /RU '$adUser' /RP '$adPass' /RL HIGHEST /F | Out-Null;
+schtasks /Run /TN `$taskName | Out-Null;
+
+`$deadline = (Get-Date).AddMinutes($timeoutMin);
+do {
+  Start-Sleep -Seconds 15;
+  `$status = schtasks /Query /TN `$taskName /FO LIST /V 2>`$null | Select-String 'Status:' | Select-Object -First 1;
+  `$running = `$status -match 'Running';
+} while (`$running -and ((Get-Date) -lt `$deadline));
+
+if (Test-Path `$logPath) { Get-Content `$logPath -Raw; }
+`$lastRc = (schtasks /Query /TN `$taskName /FO LIST /V 2>`$null | Select-String 'Last Result:' | ForEach-Object { (`$_ -split ':')[1].Trim() } | Select-Object -First 1);
+Write-Output ('TASK_LAST_RC=' + `$lastRc);
+try { schtasks /Delete /TN `$taskName /F 2>&1 | Out-Null } catch {};
+Remove-Item `$scriptPath -ErrorAction SilentlyContinue;
+"@
+
+        $tempLocal = Join-Path $env:TEMP "$tag-wrapper-$([System.Guid]::NewGuid().ToString('N')).ps1"
+        $wrapper | Out-File -FilePath $tempLocal -Encoding UTF8 -Force
+        $remoteSrc = "C:/Windows/Temp/nexus-$tag-wrapper.ps1"
+        scp -o ConnectTimeout=30 -o BatchMode=yes $tempLocal "$sshUser@$($ip):$remoteSrc" 2>&1 | Write-Host
+        $scpRc = $LASTEXITCODE
+        Remove-Item -Path $tempLocal -ErrorAction SilentlyContinue
+        if ($scpRc -ne 0) { throw "[fci-install] scp of $tag wrapper to $ip failed (rc=$scpRc)" }
+
+        $out = ssh -o ConnectTimeout=1800 "$sshUser@$ip" "powershell -NoProfile -ExecutionPolicy Bypass -File $remoteSrc" 2>&1 | Out-String
+        ssh -o ConnectTimeout=10 "$sshUser@$ip" "Remove-Item -Path '$remoteSrc' -ErrorAction SilentlyContinue" 2>&1 | Out-Null
+        return $out
+      }
+
+      Write-Host "[fci-install] step 1/2: InstallFailoverCluster on sql-fci-1 (via Scheduled Task as $adUser)..."
+
+      # ── sql-fci-1: InstallFailoverCluster orchestrate.
+      $sf1Orchestrate = @"
 `$ErrorActionPreference = 'Stop';
-`$saPwd = (Get-Content 'C:/ProgramData/nexus/sql/creds/sa-password.txt' -Raw).Trim();
+`$logPath = 'C:/Windows/Temp/fci-install-sf1.log';
+Start-Transcript -Path `$logPath -Force | Out-Null;
+try {
+  Import-Module ActiveDirectory -ErrorAction SilentlyContinue;
+  # Cache the GMSA locally (needs domain context -- now we have it).
+  if (-not (Test-ADServiceAccount -Identity 'gmsa-sql-engine' -ErrorAction SilentlyContinue)) {
+    Install-ADServiceAccount -Identity 'gmsa-sql-engine';
+    Write-Output 'GMSA_INSTALLED_SF1';
+  } else { Write-Output 'GMSA_ALREADY_SF1'; }
 
-# Probe: is FCI already installed?
-`$fciSvc = Get-Service -Name 'MSSQLSERVER' -ErrorAction SilentlyContinue;
-`$isFci  = (Get-ClusterResource -Cluster '$fciName' -ErrorAction SilentlyContinue | Where-Object { `$_.ResourceType -eq 'SQL Server' }) -ne `$null;
-if (`$isFci) {
-  Write-Output 'FCI_ALREADY_INSTALLED';
-  exit 0;
-}
+  Import-Module FailoverClusters;
+  # Idempotent: if FCI SQL resource exists, skip.
+  `$isFci = (Get-ClusterResource -ErrorAction SilentlyContinue | Where-Object { `$_.ResourceType -eq 'SQL Server' }) -ne `$null;
+  if (`$isFci) { Write-Output 'FCI_ALREADY_INSTALLED'; Stop-Transcript | Out-Null; exit 0; }
 
-# Mount ISO if not mounted.
-if (-not (Test-Path 'D:/setup.exe')) {
-  if (Test-Path 'C:/Windows/Temp/sqlserver.iso') {
+  `$saPwd = (Get-Content 'C:/ProgramData/nexus/sql/creds/sa-password.txt' -Raw).Trim();
+
+  # Mount ISO.
+  if (-not (Test-Path 'D:/setup.exe')) {
+    if (-not (Test-Path 'C:/Windows/Temp/sqlserver.iso')) { throw 'SQL Server ISO missing at C:/Windows/Temp/sqlserver.iso'; }
     Mount-DiskImage -ImagePath 'C:/Windows/Temp/sqlserver.iso' | Out-Null;
     Start-Sleep -Seconds 5;
-  } else {
-    throw 'SQL Server ISO not at C:/Windows/Temp/sqlserver.iso -- operator must upload before fci-install';
   }
-}
+  # Resolve the drive letter the ISO mounted to (not always D:).
+  `$isoVol = (Get-DiskImage -ImagePath 'C:/Windows/Temp/sqlserver.iso' | Get-Volume).DriveLetter;
+  `$setupExe = `$isoVol + ':/setup.exe';
+  Write-Output ('SETUP_EXE=' + `$setupExe);
 
-# Install Failover Cluster instance.
-`$setupArgs = @(
-  '/Q', '/ACTION=InstallFailoverCluster',
-  '/FEATURES=SQLEngine,FullText',
-  '/INSTANCENAME=MSSQLSERVER',
-  '/FAILOVERCLUSTERGROUP=SQL Server (MSSQLSERVER)',
-  ('/FAILOVERCLUSTERNETWORKNAME=$fciName'),
-  ('/FAILOVERCLUSTERIPADDRESSES=IPv4;$fciVip;Cluster Network 1;255.255.255.0'),
-  '/INSTALLSQLDATADIR=S:/SQLData',
-  '/SQLUSERDBDIR=S:/SQLData/UserDB',
-  '/SQLUSERDBLOGDIR=S:/SQLData/UserDBLog',
-  '/SQLSVCACCOUNT=NEXUS\gmsa-sql-engine`$',
-  '/SQLSYSADMINACCOUNTS=NEXUS\Domain Admins',
-  '/SECURITYMODE=SQL',
-  ('/SAPWD=' + `$saPwd),
-  '/IACCEPTSQLSERVERLICENSETERMS'
-) -join ' ';
-& 'D:/setup.exe' `$setupArgs.Split(' ');
-if (`$LASTEXITCODE -ne 0 -and `$LASTEXITCODE -ne 3010) {
-  throw 'setup.exe InstallFailoverCluster failed (exit=' + `$LASTEXITCODE + ')';
+  `$setupArgs = @(
+    '/Q', '/ACTION=InstallFailoverCluster',
+    '/SUPPRESSPRIVACYSTATEMENTNOTICE',
+    '/ENU',
+    '/FEATURES=SQLEngine,FullText',
+    '/INSTANCENAME=MSSQLSERVER',
+    '/INSTANCEID=MSSQLSERVER',
+    '/FAILOVERCLUSTERGROUP=SQL Server (MSSQLSERVER)',
+    ('/FAILOVERCLUSTERNETWORKNAME=$fciName'),
+    ('/FAILOVERCLUSTERIPADDRESSES=IPv4;$fciVip;Cluster Network 1;255.255.255.0'),
+    '/INSTALLSQLDATADIR=S:\SQLData',
+    '/SQLSVCACCOUNT=$adNetbios\gmsa-sql-engine`$',
+    '/SQLSYSADMINACCOUNTS=$adNetbios\Domain Admins',
+    '/SECURITYMODE=SQL',
+    ('/SAPWD=' + `$saPwd),
+    '/IACCEPTSQLSERVERLICENSETERMS'
+  );
+  Write-Output 'RUNNING_SETUP_INSTALLFCI...';
+  & `$setupExe `$setupArgs;
+  `$rc = `$LASTEXITCODE;
+  Write-Output ('SETUP_RC=' + `$rc);
+  if (`$rc -ne 0 -and `$rc -ne 3010) { throw ('setup.exe InstallFailoverCluster failed exit=' + `$rc); }
+  Write-Output 'FCI_INSTALLED_ON_SF1';
+} catch {
+  Write-Output ('FCI_SF1_FAIL: ' + `$_.Exception.Message);
+  Stop-Transcript | Out-Null;
+  exit 1;
 }
-Write-Output 'FCI_INSTALLED_ON_FCI1';
+Stop-Transcript | Out-Null;
 "@
 
-      $b64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($sf1Remote))
-      $output = ssh -o ConnectTimeout=900 "$sshUser@$sf1Ip" "powershell -NoProfile -EncodedCommand $b64" 2>&1 | Out-String
-      Write-Host $output.Trim()
-      if ($LASTEXITCODE -ne 0) { throw "[fci-install] sql-fci-1 InstallFailoverCluster failed (rc=$LASTEXITCODE)" }
+      $out1 = Invoke-AsDomainTask -ip $sf1Ip -tag 'NexusFciInstallSf1' -orchestrate $sf1Orchestrate -timeoutMin 30
+      Write-Host $out1.Trim()
+      if ($out1 -notmatch 'FCI_INSTALLED_ON_SF1' -and $out1 -notmatch 'FCI_ALREADY_INSTALLED') {
+        throw "[fci-install] sql-fci-1 InstallFailoverCluster did not report success"
+      }
 
-      if ($output -notmatch 'FCI_ALREADY_INSTALLED') {
-        Write-Host "[fci-install] step 2/2: AddNode on sql-fci-2..."
+      if ($out1 -notmatch 'FCI_ALREADY_INSTALLED') {
+        Write-Host "[fci-install] step 2/2: AddNode on sql-fci-2 (via Scheduled Task as $adUser)..."
 
-        $sf2Remote = @"
+        $sf2Orchestrate = @"
 `$ErrorActionPreference = 'Stop';
-`$saPwd = (Get-Content 'C:/ProgramData/nexus/sql/creds/sa-password.txt' -Raw).Trim();
-if (-not (Test-Path 'D:/setup.exe')) {
-  if (Test-Path 'C:/Windows/Temp/sqlserver.iso') {
-    Mount-DiskImage -ImagePath 'C:/Windows/Temp/sqlserver.iso' | Out-Null;
-    Start-Sleep -Seconds 5;
-  } else { throw 'SQL Server ISO not present on sql-fci-2' }
+`$logPath = 'C:/Windows/Temp/fci-install-sf2.log';
+Start-Transcript -Path `$logPath -Force | Out-Null;
+try {
+  Import-Module ActiveDirectory -ErrorAction SilentlyContinue;
+  if (-not (Test-ADServiceAccount -Identity 'gmsa-sql-engine' -ErrorAction SilentlyContinue)) {
+    Install-ADServiceAccount -Identity 'gmsa-sql-engine';
+    Write-Output 'GMSA_INSTALLED_SF2';
+  } else { Write-Output 'GMSA_ALREADY_SF2'; }
+
+  Import-Module FailoverClusters;
+  # Idempotent: is sql-fci-2 already a possible owner of the SQL resource?
+  `$sqlRes = Get-ClusterResource -ErrorAction SilentlyContinue | Where-Object { `$_.ResourceType -eq 'SQL Server' } | Select-Object -First 1;
+  if (`$sqlRes) {
+    `$owners = (Get-ClusterOwnerNode -Resource `$sqlRes.Name -ErrorAction SilentlyContinue).OwnerNodes.Name;
+    if (`$owners -contains 'sql-fci-2') { Write-Output 'NODE_ALREADY_ADDED'; Stop-Transcript | Out-Null; exit 0; }
+  }
+
+  `$saPwd = (Get-Content 'C:/ProgramData/nexus/sql/creds/sa-password.txt' -Raw).Trim();
+  if (-not (Test-Path 'C:/Windows/Temp/sqlserver.iso')) { throw 'SQL Server ISO missing on sql-fci-2'; }
+  Mount-DiskImage -ImagePath 'C:/Windows/Temp/sqlserver.iso' -ErrorAction SilentlyContinue | Out-Null;
+  Start-Sleep -Seconds 5;
+  `$isoVol = (Get-DiskImage -ImagePath 'C:/Windows/Temp/sqlserver.iso' | Get-Volume).DriveLetter;
+  `$setupExe = `$isoVol + ':/setup.exe';
+
+  `$addArgs = @(
+    '/Q', '/ACTION=AddNode',
+    '/SUPPRESSPRIVACYSTATEMENTNOTICE',
+    '/ENU',
+    '/INSTANCENAME=MSSQLSERVER',
+    '/CONFIRMIPDEPENDENCYCHANGE=1',
+    '/SQLSVCACCOUNT=$adNetbios\gmsa-sql-engine`$',
+    '/IACCEPTSQLSERVERLICENSETERMS'
+  );
+  Write-Output 'RUNNING_SETUP_ADDNODE...';
+  & `$setupExe `$addArgs;
+  `$rc = `$LASTEXITCODE;
+  Write-Output ('SETUP_RC=' + `$rc);
+  if (`$rc -ne 0 -and `$rc -ne 3010) { throw ('setup.exe AddNode failed exit=' + `$rc); }
+  Write-Output 'FCI_ADDED_ON_SF2';
+} catch {
+  Write-Output ('FCI_SF2_FAIL: ' + `$_.Exception.Message);
+  Stop-Transcript | Out-Null;
+  exit 1;
 }
-`$addArgs = @(
-  '/Q', '/ACTION=AddNode',
-  '/INSTANCENAME=MSSQLSERVER',
-  '/CONFIRMIPDEPENDENCYCHANGE=1',
-  '/SQLSVCACCOUNT=NEXUS\gmsa-sql-engine`$',
-  ('/SAPWD=' + `$saPwd),
-  '/IACCEPTSQLSERVERLICENSETERMS'
-) -join ' ';
-& 'D:/setup.exe' `$addArgs.Split(' ');
-if (`$LASTEXITCODE -ne 0 -and `$LASTEXITCODE -ne 3010) {
-  throw 'setup.exe AddNode failed (exit=' + `$LASTEXITCODE + ')';
-}
-Write-Output 'FCI_ADDED_ON_FCI2';
+Stop-Transcript | Out-Null;
 "@
-        $b64_2 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($sf2Remote))
-        $output_2 = ssh -o ConnectTimeout=900 "$sshUser@$sf2Ip" "powershell -NoProfile -EncodedCommand $b64_2" 2>&1 | Out-String
-        Write-Host $output_2.Trim()
-        if ($LASTEXITCODE -ne 0) { throw "[fci-install] sql-fci-2 AddNode failed (rc=$LASTEXITCODE)" }
+
+        $out2 = Invoke-AsDomainTask -ip $sf2Ip -tag 'NexusFciAddNodeSf2' -orchestrate $sf2Orchestrate -timeoutMin 30
+        Write-Host $out2.Trim()
+        if ($out2 -notmatch 'FCI_ADDED_ON_SF2' -and $out2 -notmatch 'NODE_ALREADY_ADDED') {
+          throw "[fci-install] sql-fci-2 AddNode did not report success"
+        }
       }
 
       Write-Host "[fci-install] FCI install complete; virtual server $fciName online at $fciVip"
