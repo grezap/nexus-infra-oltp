@@ -84,13 +84,17 @@ resource "null_resource" "sqlserver_tls" {
 [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$lstB64')) | Out-File 'C:/ProgramData/nexus/vault-agent/templates/listener-cert.tpl' -Encoding utf8;
 
 # Add 2 template stanzas to agent.hcl if not already present.
+# Transient #25d at 0.G.7 ratify 2026-05-21: cannot nest `@"..."@` inside an
+# outer `@"..."@` -- PS's lexer treats the first `"@` at line-start as the
+# END of the outer here-string, truncating the script + leaving the rest as
+# raw PS code that doesn't parse (Unexpected token '}'). Workaround: build
+# the appended stanzas as a single line via a string array + Add-Content.
 `$hcl = Get-Content 'C:/ProgramData/nexus/vault-agent/agent.hcl' -Raw;
 if (`$hcl -notmatch 'node-cert.tpl') {
-  `$append = @"
-template { source = "C:/ProgramData/nexus/vault-agent/templates/node-cert.tpl" destination = "C:/ProgramData/nexus/sql/tls/$hostName.pem" perms = "0640" }
-template { source = "C:/ProgramData/nexus/vault-agent/templates/listener-cert.tpl" destination = "C:/ProgramData/nexus/sql/tls/listener.pem" perms = "0640" }
-"@;
-  `$append | Add-Content 'C:/ProgramData/nexus/vault-agent/agent.hcl';
+  `$nodeTplStanza = 'template { source = "C:/ProgramData/nexus/vault-agent/templates/node-cert.tpl" destination = "C:/ProgramData/nexus/sql/tls/$hostName.pem" perms = "0640" }';
+  `$lstTplStanza  = 'template { source = "C:/ProgramData/nexus/vault-agent/templates/listener-cert.tpl" destination = "C:/ProgramData/nexus/sql/tls/listener.pem" perms = "0640" }';
+  Add-Content -Path 'C:/ProgramData/nexus/vault-agent/agent.hcl' -Value `$nodeTplStanza;
+  Add-Content -Path 'C:/ProgramData/nexus/vault-agent/agent.hcl' -Value `$lstTplStanza;
 }
 New-Item -ItemType Directory -Force -Path 'C:/ProgramData/nexus/sql/tls' | Out-Null;
 Restart-Service -Name 'nexus-vault-agent' -Force;

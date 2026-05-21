@@ -47,7 +47,15 @@ Write-Host "=== 11-cluster-features: installing WSFC + iSCSI + MPIO + opening fi
 # 2026-05-20. So we only need Failover-Clustering + Multipath-IO here;
 # msiscsi service activation lives in role-overlay-iscsi-attach.tf
 # (terraform apply time, FCI nodes only -- AG replicas don't use iSCSI).
-$features = @('Failover-Clustering', 'Multipath-IO')
+$features = @('Failover-Clustering', 'Multipath-IO', 'RSAT-AD-PowerShell')
+# RSAT-AD-PowerShell is the ActiveDirectory PowerShell module (provides
+# Install-ADServiceAccount, Test-ADServiceAccount, Get-ADComputer, etc.).
+# Required by terraform's role-overlay-sqlserver-vault-agents.tf to
+# `Install-ADServiceAccount -Identity gmsa-sql-engine` on each node.
+# Transient #25c at 0.G.7 ratify 2026-05-21 -- missing this caused
+# GMSA_INSTALL_FAILED on every node + SQL Server FCI install would have
+# downstream-failed because the service can't run as gmsa-sql-engine$.
+# Baking at template time pays the install cost once across 4 clones.
 foreach ($f in $features) {
     $state = (Get-WindowsFeature -Name $f).InstallState
     if ($state -eq 'Installed') {

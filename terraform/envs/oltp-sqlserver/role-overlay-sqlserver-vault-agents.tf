@@ -119,14 +119,24 @@ $templateBlocks
       }
       $templates['gmsa-info'] = "{{ with secret `"nexus/data/oltp/sqlserver/gmsa-info`" }}{{ .Data.data | toJSON }}{{ end }}"
 
+      # Transient #25b at 0.G.7 ratify 2026-05-21: PowerShell's Out-File with
+      # `-Encoding utf8` (Windows PowerShell 5.1) prepends a 3-byte UTF-8 BOM
+      # (`EF BB BF`). Vault Agent's AppRole `role_id_file_path` /
+      # `secret_id_file_path` read the file VERBATIM as the credential; with
+      # BOM the role-id reads as `<BOM>aabbccdd-...` which fails AppRole
+      # auth silently → service crashes on start → SERVICE_STATUS=Stopped.
+      # Fix: use `[System.IO.File]::WriteAllText` (no BOM) for the 4
+      # auth-critical files (role-id, secret-id, agent.hcl, ca-bundle.crt).
+      # Template files are still OK with BOM since Vault Agent renders them
+      # via Go template engine which strips leading whitespace.
       $remote = @"
 `$ErrorActionPreference = 'Stop';
 New-Item -ItemType Directory -Force -Path 'C:/ProgramData/nexus/vault-agent/templates' | Out-Null;
 New-Item -ItemType Directory -Force -Path 'C:/ProgramData/nexus/sql/creds' | Out-Null;
-[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$bodyB64')) | Out-File 'C:/ProgramData/nexus/vault-agent/agent.hcl' -Encoding utf8;
-[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$caB64')) | Out-File 'C:/ProgramData/nexus/vault-agent/ca-bundle.crt' -Encoding utf8;
-'$($cfg.role_id)' | Out-File 'C:/ProgramData/nexus/vault-agent/role-id' -Encoding utf8 -NoNewline;
-'$($cfg.secret_id)' | Out-File 'C:/ProgramData/nexus/vault-agent/secret-id' -Encoding utf8 -NoNewline;
+[System.IO.File]::WriteAllText('C:/ProgramData/nexus/vault-agent/agent.hcl', [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$bodyB64')));
+[System.IO.File]::WriteAllText('C:/ProgramData/nexus/vault-agent/ca-bundle.crt', [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$caB64')));
+[System.IO.File]::WriteAllText('C:/ProgramData/nexus/vault-agent/role-id', '$($cfg.role_id)');
+[System.IO.File]::WriteAllText('C:/ProgramData/nexus/vault-agent/secret-id', '$($cfg.secret_id)');
 "@
       foreach ($t in $templates.Keys) {
         $tplB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($templates[$t]))
@@ -143,6 +153,19 @@ if (-not (Test-Path 'C:/Program Files/HashiCorp/Vault/vault.exe')) {
 }
 
 # Install GMSA on this node (lets Install-ADServiceAccount cache the password locally).
+# Transient #25c at 0.G.7 ratify 2026-05-21: the Packer template installs
+# Failover-Clustering + Multipath-IO but NOT RSAT-AD-PowerShell (which
+# provides the ActiveDirectory PS module). Without it, Import-Module
+# ActiveDirectory throws "module ... not loaded ... no valid module file"
+# → GMSA install skipped → SQL Server FCI install will fail later because
+# the service account can't run as gmsa-sql-engine$. Install the feature
+# at runtime as a self-healing fallback; permanent fix lands in
+# packer/oltp-sqlserver-node/scripts/11-cluster-features.ps1 adding
+# RSAT-AD-PowerShell to the Add-WindowsFeature list.
+if (-not (Get-WindowsFeature -Name RSAT-AD-PowerShell -ErrorAction SilentlyContinue).Installed) {
+  Write-Output 'INSTALLING_RSAT_AD_POWERSHELL';
+  Add-WindowsFeature -Name RSAT-AD-PowerShell -IncludeManagementTools -ErrorAction SilentlyContinue | Out-Null;
+}
 try {
   Import-Module ActiveDirectory -ErrorAction Stop;
   if (-not (Test-ADServiceAccount -Identity 'gmsa-sql-engine' -ErrorAction SilentlyContinue)) {
@@ -169,13 +192,32 @@ Start-Sleep -Seconds 8;
 Write-Output ('SERVICE_STATUS=' + `$status);
 "@
 
-      $b64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($remote))
-      $output = ssh -o ConnectTimeout=60 "$sshUser@$ip" "powershell -NoProfile -EncodedCommand $b64" 2>&1 | Out-String
+      # Transient #25 at 0.G.7 ratify 2026-05-21: the `$remote` payload here
+      # is ~8.6KB → base64-Unicode ~23KB → past the Windows ssh.exe argv ~6KB
+      # cliff per memory feedback_ssh_stage1_size_limit.md. EncodedCommand-as-
+      # SSH-arg silently TRUNCATES the base64 → remote PS sees incomplete
+      # script → "The string is missing the terminator: '". Fix: scp the
+      # payload to remote as a .ps1 file, then `powershell -File` -- bypasses
+      # the argv length limit entirely.
+      $tempLocal  = Join-Path $env:TEMP "vault-agent-$hostName-$([System.Guid]::NewGuid().ToString('N')).ps1"
+      $remote | Out-File -FilePath $tempLocal -Encoding UTF8 -Force
+      $remoteSrc  = "C:/Windows/Temp/nexus-vault-agent-$hostName.ps1"
+      scp -o ConnectTimeout=30 -o BatchMode=yes $tempLocal "$sshUser@$($ip):$remoteSrc" 2>&1 | Write-Host
+      if ($LASTEXITCODE -ne 0) {
+        Remove-Item -Path $tempLocal -ErrorAction SilentlyContinue
+        throw "[sqlserver-vault-agents] $hostName : scp of vault-agent payload failed (rc=$LASTEXITCODE)"
+      }
+      Remove-Item -Path $tempLocal -ErrorAction SilentlyContinue
+
+      $output = ssh -o ConnectTimeout=60 "$sshUser@$ip" "powershell -NoProfile -File $remoteSrc" 2>&1 | Out-String
       Write-Host $output.Trim()
       if ($LASTEXITCODE -ne 0) { throw "[sqlserver-vault-agents] $hostName : Vault Agent install failed (rc=$LASTEXITCODE)" }
       if ($output -notmatch 'SERVICE_STATUS=Running') {
         throw "[sqlserver-vault-agents] $hostName : nexus-vault-agent service did not reach Running"
       }
+      # Cleanup remote payload (best-effort; leaves no creds since templates
+      # are base64-decoded into separate files by the script).
+      ssh -o ConnectTimeout=10 "$sshUser@$ip" "Remove-Item -Path '$remoteSrc' -ErrorAction SilentlyContinue" 2>&1 | Out-Null
       Write-Host "[sqlserver-vault-agents] $hostName : nexus-vault-agent running + GMSA installed locally"
     PWSH
   }
