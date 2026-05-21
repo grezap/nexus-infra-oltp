@@ -3,7 +3,7 @@
 # Per-cluster Redis state outputs -- Phase 0.G.3.5b.
 
 output "redis_endpoints" {
-  description = "Per-node Redis Cluster endpoints (TLS on 6379, cluster bus on 16379). Reach via VMnet11 dnsmasq names redis-N.nexus.lab."
+  description = "Per-node Redis Cluster endpoints (TLS on 6379, cluster bus on 16379). Reach via the VMnet11 IPs (the gateway dnsmasq DHCP suffix is nexus.local, NOT nexus.lab -- the .nexus.lab FQDN does not resolve for these non-domain nodes; use the IPs)."
   value = {
     for n in ["redis-1", "redis-2", "redis-3", "redis-4", "redis-5", "redis-6"] : n => {
       service_ip = lookup({
