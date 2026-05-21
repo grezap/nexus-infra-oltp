@@ -242,12 +242,17 @@ try {
     ('/FAILOVERCLUSTERIPADDRESSES=IPv4;$fciVip;' + `$fciNet + ';255.255.255.0'),
     '/INSTALLSQLDATADIR=S:\SQLData',
     '/SQLSVCACCOUNT=$adNetbios\gmsa-sql-engine`$',
+    '/AGTSVCACCOUNT=$adNetbios\gmsa-sql-engine`$',
     '/SQLSYSADMINACCOUNTS=$adNetbios\Domain Admins',
     '/SECURITYMODE=SQL',
     ('/SAPWD=' + `$saPwd),
     '/SKIPRULES=Cluster_VerifyForErrors',
     '/IACCEPTSQLSERVERLICENSETERMS'
   );
+  # /AGTSVCACCOUNT (SQL Server Agent service) is REQUIRED for FCI install --
+  # transient #28h at 0.G.7 ratify 2026-05-21: omitting it -> setup error
+  # -2061762559 "credentials you provided for the SQL Server Agent service
+  # are invalid". The GMSA runs the agent too (no password needed).
   # /SKIPRULES=Cluster_VerifyForErrors -- transient #28b at 0.G.7 ratify
   # 2026-05-21: SQL setup error 3008 "cluster either has not been verified
   # or there are errors in the verification report" because we skipped
