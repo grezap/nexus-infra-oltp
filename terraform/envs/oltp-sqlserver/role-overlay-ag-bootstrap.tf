@@ -71,11 +71,15 @@ resource "null_resource" "ag_bootstrap" {
         $tsqlB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($tsql))
         $logFile = "C:/Windows/Temp/$tag.log"
         # Orchestrate: decode the T-SQL + run via sqlcmd -E -S <server>.
+        # Transient #29b at 0.G.7 ratify 2026-05-22: sqlcmd's -i argument
+        # mis-parses FORWARD-slash paths ('C:/Windows/Temp/x.sql' -> it splits
+        # at the first '/' + tries to open file 'C:' -> "Access is denied").
+        # Use BACKSLASH paths for the sqlcmd -i temp file.
         $orchestrate = @"
 `$ErrorActionPreference = 'Continue';
 Start-Transcript -Path '$logFile' -Force | Out-Null;
 `$tsql = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$tsqlB64'));
-`$tmpSql = 'C:/Windows/Temp/$tag.sql';
+`$tmpSql = 'C:\Windows\Temp\$tag.sql';
 Set-Content -Path `$tmpSql -Value `$tsql -Encoding UTF8;
 & sqlcmd -S '$sqlServer' -E -b -i `$tmpSql;
 `$rc = `$LASTEXITCODE;

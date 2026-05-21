@@ -326,7 +326,15 @@ Stop-Transcript | Out-Null;
         throw "[fci-install] sql-fci-1 InstallFailoverCluster did not report success"
       }
 
-      if ($out1 -notmatch 'FCI_ALREADY_INSTALLED') {
+      # AddNode ALWAYS runs (transient #28m at 0.G.7 ratify 2026-05-22): the
+      # AddNode orchestrate is self-idempotent (it emits NODE_ALREADY_ADDED if
+      # sql-fci-2 is already a possible owner). Gating it behind
+      # "FCI_ALREADY_INSTALLED absent" was wrong -- on a re-run where the FCI
+      # exists on sql-fci-1 but a prior AddNode FAILED (sql-fci-2 not yet an
+      # owner), the gate skipped AddNode forever, leaving a 1-node FCI. Always
+      # invoking AddNode + relying on its own idempotency check is correct for
+      # both from-zero (InstallFCI then AddNode) AND retry (skip if added).
+      if ($true) {
         Write-Host "[fci-install] step 2/2: AddNode on sql-fci-2 (via Scheduled Task as $adUser)..."
 
         $sf2Orchestrate = @"
