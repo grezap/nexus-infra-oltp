@@ -43,7 +43,17 @@ resource "null_resource" "iscsi_attach" {
 
       # Format-Volume is done on sql-fci-1 ONLY (the lower-IP node);
       # sql-fci-2 just attaches the same LUN.
-      $isPrimary = ($hostName -eq 'sql-fci-1')
+      #
+      # IMPORTANT: $isPrimary is intentionally a STRING ('$true' / '$false'),
+      # NOT a boolean. The here-string @"..."@ below interpolates this value
+      # at the build-host side; if it were a [bool], it would render as the
+      # literal text "True"/"False" which the remote PowerShell would parse
+      # as command names (NOT as the built-in $true/$false booleans), making
+      # both `if` and `elseif` branches silently fall through. Storing the
+      # string '$true' makes the interpolation produce the PS literal token.
+      # Pre-emptive fix flagged at 0.G.7 ratify 2026-05-21 during downstream
+      # overlay audit.
+      $isPrimary = if ($hostName -eq 'sql-fci-1') { '$true' } else { '$false' }
 
       $remote = @"
 `$ErrorActionPreference = 'Stop';

@@ -60,7 +60,22 @@ resource "null_resource" "sqlserver_domain_join" {
         throw "[sqlserver-domain-join] nexusadmin-credentials.json not found at $adCredsJson -- security env's role-overlay-vault-nexusadmin-creds-seed.tf must apply first (writes this sidecar from Vault KV nexus/foundation/identity/nexusadmin)."
       }
       $adCreds = Get-Content $adCredsJson -Raw | ConvertFrom-Json
-      $adUser = "$adDomain\\$($adCreds.username)"
+      # Use the NETBIOS form (NEXUS\nexusadmin) NOT the FQDN form
+      # (nexus.lab\nexusadmin). Transient #24 at 0.G.7 ratify 2026-05-21:
+      # Add-Computer with `nexus.lab\nexusadmin` failed with Win32 error
+      # 2202 (ERROR_NO_SUCH_USER) even though the AD password was correct
+      # and reachable from the SQL nodes. The canonical jumpbox overlay
+      # (foundation env's role-overlay-jumpbox-domainjoin.tf) uses
+      # `$netbios\nexusadmin` -- mirror that pattern. Sidecar carries the
+      # netbios field starting v2 (added by role-overlay-vault-nexusadmin-
+      # creds-seed.tf + live-patched on the build host).
+      $adNetbios = if ($adCreds.PSObject.Properties['netbios']) { $adCreds.netbios } else { 'NEXUS' }
+      # SINGLE backslash (not double). PS double-quoted strings do not interpret
+      # backslash escapes; `\\` becomes literal two-backslashes which PSCredential
+      # rejects as "The specified username is invalid". The canonical jumpbox
+      # overlay uses single `\` (see foundation/role-overlay-jumpbox-domainjoin.tf
+      # line 118: `'$netbios\nexusadmin'`). Transient #24b at 0.G.7 ratify 2026-05-21.
+      $adUser = "$adNetbios\$($adCreds.username)"
       $adPass = $adCreds.password
       if (-not $adPass) { throw "[sqlserver-domain-join] password field missing from nexusadmin-credentials.json" }
 

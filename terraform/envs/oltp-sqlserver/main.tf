@@ -145,4 +145,9 @@ locals {
   # Sidecar JSON path on the build host (written by security env's
   # role-overlay-vault-agent-sqlserver-approles.tf).
   vault_agent_sidecar_dir = pathexpand("~/.nexus")
+
+  # Pre-expanded build-host CA bundle path -- avoids needing PS-side `~`
+  # resolution downstream (PS has no `pathexpand` function, and ~ doesn't
+  # auto-expand in Test-Path on Windows pwsh in non-interactive contexts).
+  vault_ca_bundle_path_expanded = pathexpand(var.vault_ca_bundle_path)
 }

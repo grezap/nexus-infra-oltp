@@ -42,9 +42,14 @@ resource "null_resource" "sqlserver_vault_agents" {
       $ip         = '${each.value.vmnet11}'
       $role       = '${each.value.role}'
       $sshUser    = '${var.ssh_username}'
-      $sidecarDir = pathexpand('${local.vault_agent_sidecar_dir}')
+      # NOTE: both paths are pre-expanded by Terraform's pathexpand() in
+      # main.tf (locals); no PowerShell-side pathexpand needed (PS has no
+      # such function). Transient #24 at 0.G.7 ratify 2026-05-21 pre-emptive
+      # fix: original code called pathexpand(...) in PS which would have
+      # failed at apply time with "CommandNotFoundException".
+      $sidecarDir = '${local.vault_agent_sidecar_dir}'
       $sidecar    = Join-Path $sidecarDir "vault-agent-oltp-sqlserver-$hostName.json"
-      $caBundle   = pathexpand('${var.vault_ca_bundle_path}')
+      $caBundle   = '${local.vault_ca_bundle_path_expanded}'
 
       if (-not (Test-Path $sidecar)) {
         throw "[sqlserver-vault-agents] sidecar not found at $sidecar -- security env's role-overlay-vault-agent-sqlserver-approles.tf must apply first."
