@@ -348,13 +348,16 @@ try {
     Write-Output 'GMSA_INSTALLED_SF2';
   } else { Write-Output 'GMSA_ALREADY_SF2'; }
 
-  Import-Module FailoverClusters;
-  # Idempotent: is sql-fci-2 already a possible owner of the SQL resource?
-  `$sqlRes = Get-ClusterResource -ErrorAction SilentlyContinue | Where-Object { `$_.ResourceType -eq 'SQL Server' } | Select-Object -First 1;
-  if (`$sqlRes) {
-    `$owners = (Get-ClusterOwnerNode -Resource `$sqlRes.Name -ErrorAction SilentlyContinue).OwnerNodes.Name;
-    if (`$owners -contains 'sql-fci-2') { Write-Output 'NODE_ALREADY_ADDED'; Stop-Transcript | Out-Null; exit 0; }
-  }
+  # Idempotent check via REGISTRY (not cluster cmdlets) -- transient #28n at
+  # 0.G.7 ratify 2026-05-22: Get-ClusterResource/Get-ClusterOwnerNode threw a
+  # cryptic "System error" inside the scheduled-task (NEXUS\nexusadmin) context
+  # on sql-fci-2 (works fine as the local SSH user, so it's a task-context
+  # quirk -- likely the FailoverClusters module's Hyper-V dependency under
+  # ErrorActionPreference=Stop). If sql-fci-2 is already an FCI node, its
+  # MSSQL17.MSSQLSERVER/Setup/SqlCluster registry value = 1 -- a plain
+  # registry read, no cluster cmdlet, no Hyper-V dependency.
+  `$alreadyNode = (Get-ItemProperty 'HKLM:/SOFTWARE/Microsoft/Microsoft SQL Server/MSSQL17.MSSQLSERVER/Setup' -Name SqlCluster -ErrorAction SilentlyContinue).SqlCluster;
+  if (`$alreadyNode -eq 1) { Write-Output 'NODE_ALREADY_ADDED'; Stop-Transcript | Out-Null; exit 0; }
 
   `$saPwd = (Get-Content 'C:/ProgramData/nexus/sql/creds/sa-password.txt' -Raw).Trim();
   if (-not (Test-Path 'C:/Windows/Temp/sqlserver.iso')) { throw 'SQL Server ISO missing on sql-fci-2'; }
@@ -372,8 +375,15 @@ try {
     '/INSTANCENAME=MSSQLSERVER',
     '/CONFIRMIPDEPENDENCYCHANGE=1',
     '/SQLSVCACCOUNT=$adNetbios\gmsa-sql-engine`$',
+    '/AGTSVCACCOUNT=$adNetbios\gmsa-sql-engine`$',
+    '/SKIPRULES=Cluster_VerifyForErrors',
     '/IACCEPTSQLSERVERLICENSETERMS'
   );
+  # AddNode needs the same /SKIPRULES=Cluster_VerifyForErrors as InstallFCI
+  # (#28b) -- we skipped Test-Cluster preflight (#27c), so AddNode's cluster-
+  # verify rule also fails with 3008/-2067919936 without it. Also /AGTSVC
+  # ACCOUNT for the agent service (#28h, AddNode configures the agent too).
+  # Transient #28o at 0.G.7 ratify 2026-05-22.
   Write-Output 'RUNNING_SETUP_ADDNODE...';
   & `$setupExe `$addArgs;
   `$rc = `$LASTEXITCODE;

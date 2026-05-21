@@ -237,12 +237,12 @@ variable "wsfc_bootstrap_v" {
 variable "fci_install_v" {
   description = "FCI install overlay version. Bump to re-run."
   type        = string
-  default     = "2"
+  default     = "4"
 }
 variable "ag_bootstrap_v" {
   description = "AG bootstrap overlay version. Bump to re-run."
   type        = string
-  default     = "1"
+  default     = "7"
 }
 variable "ag_listener_v" {
   description = "AG Listener overlay version. Bump to re-run."
