@@ -67,9 +67,20 @@ if (-not (Get-IscsiTargetPortal -TargetPortalAddress 192.168.70.1 -ErrorAction S
 }
 
 # Stage 3: CHAP secret
+# Transient #26 at 0.G.7 ratify 2026-05-21: secret rotated KV-wide from
+# 32-char hex to 16-char hex (Windows iSCSI initiator caps CHAP secret
+# at 12-16 chars; tgt accepts any length per RFC 3720).
+# Transient #26b: Set-IscsiChapSecret is for MUTUAL CHAP (initiator
+# authenticates target back). For ONEWAYCHAP, the initiator-side
+# secret is passed directly via Connect-IscsiTarget's -ChapSecret.
+# Calling Set-IscsiChapSecret confused the Windows iSCSI initiator
+# state into expecting target back-auth which tgt doesn't provide ->
+# Connect-IscsiTarget throws "Authentication Failure" (HRESULT
+# 0xefff0009). Removed -- the -ChapSecret on Connect-IscsiTarget is
+# sufficient for OneWayCHAP.
 `$chapSecret = (Get-Content 'C:/ProgramData/nexus/sql/creds/iscsi-chap-secret.txt' -Raw).Trim();
 if (-not `$chapSecret -or `$chapSecret.Length -lt 12) { throw 'iSCSI CHAP secret missing/short -- vault-agents stage failed?' }
-Set-IscsiChapSecret -ChapSecret `$chapSecret;
+if (`$chapSecret.Length -gt 16) { `$chapSecret = `$chapSecret.Substring(0, 16) }
 
 # Stage 4: connect (idempotent)
 `$existingSession = Get-IscsiSession -ErrorAction SilentlyContinue | Where-Object { `$_.TargetNodeAddress -match 'sql-fci.lun1' };
