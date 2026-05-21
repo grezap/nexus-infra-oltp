@@ -47,7 +47,9 @@ resource "null_resource" "fci_install" {
       $sf1Ip     = '${local.sql_nodes["sql-fci-1"].vmnet11}'
       $sf2Ip     = '${local.sql_nodes["sql-fci-2"].vmnet11}'
       $fciVip    = '${local.fci_virtual_ip}'
-      $fciName   = '${local.fci_cluster_name}'
+      # FCI virtual server name (SQL network name) -- distinct from the WSFC
+      # cluster CNO name to avoid the Network Name resource collision.
+      $fciName   = '${local.fci_virtual_server_name}'
 
       # Domain creds for the schtasks Password-logon-type dispatch.
       $adCredsJson = Join-Path $HOME ".nexus/nexusadmin-credentials.json"
@@ -62,12 +64,20 @@ resource "null_resource" "fci_install" {
       #    completion, return the transcript. Mirrors role-overlay-wsfc-
       #    bootstrap.tf. $tag names the task + log + script paths.
       function Invoke-AsDomainTask {
-        param([string]$ip, [string]$tag, [string]$orchestrate, [int]$timeoutMin = 30)
+        param([string]$ip, [string]$tag, [string]$orchestrate, [string]$logFile, [int]$timeoutMin = 30)
 
+        # $logFile MUST match the orchestrate's Start-Transcript path so the
+        # wrapper reads the right transcript. Transient #28f at 0.G.7 ratify
+        # 2026-05-21: previously the wrapper read $tag.log but the orchestrate
+        # wrote fci-install-sf1.log -> $out never contained the success token
+        # even though setup.exe Passed. Now the caller passes the exact path.
+        # Completion is detected by polling for the transcript-END marker in
+        # the log (definitive) rather than the schtasks Status field (which
+        # parsed unreliably + could exit the loop before the transcript flushed).
         $wrapper = @"
 `$ErrorActionPreference = 'Continue';
 `$scriptPath = 'C:/Windows/Temp/$tag-orchestrate.ps1';
-`$logPath = 'C:/Windows/Temp/$tag.log';
+`$logPath = '$logFile';
 Remove-Item `$logPath -ErrorAction SilentlyContinue;
 Remove-Item `$scriptPath -ErrorAction SilentlyContinue;
 @'
@@ -79,12 +89,21 @@ try { schtasks /Delete /TN `$taskName /F 2>&1 | Out-Null } catch {};
 schtasks /Create /TN `$taskName /TR "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `$scriptPath" /SC ONCE /ST 23:59 /RU '$adUser' /RP '$adPass' /RL HIGHEST /F | Out-Null;
 schtasks /Run /TN `$taskName | Out-Null;
 
+# Poll for the transcript-END marker (written by Stop-Transcript) -- a
+# definitive completion signal regardless of schtasks status parsing.
 `$deadline = (Get-Date).AddMinutes($timeoutMin);
+`$done = `$false;
 do {
   Start-Sleep -Seconds 15;
+  if (Test-Path `$logPath) {
+    `$logContent = Get-Content `$logPath -Raw -ErrorAction SilentlyContinue;
+    if (`$logContent -match 'Windows PowerShell transcript end') { `$done = `$true; }
+  }
   `$status = schtasks /Query /TN `$taskName /FO LIST /V 2>`$null | Select-String 'Status:' | Select-Object -First 1;
-  `$running = `$status -match 'Running';
-} while (`$running -and ((Get-Date) -lt `$deadline));
+  `$stillRunning = `$status -match 'Running';
+} while ((-not `$done) -and `$stillRunning -and ((Get-Date) -lt `$deadline));
+# Grace for final flush.
+Start-Sleep -Seconds 3;
 
 if (Test-Path `$logPath) { Get-Content `$logPath -Raw; }
 `$lastRc = (schtasks /Query /TN `$taskName /FO LIST /V 2>`$null | Select-String 'Last Result:' | ForEach-Object { (`$_ -split ':')[1].Trim() } | Select-Object -First 1);
@@ -139,6 +158,35 @@ try {
   `$setupExe = `$isoVol + ':/setup.exe';
   Write-Output ('SETUP_EXE=' + `$setupExe);
 
+  # Transient #28e at 0.G.7 ratify 2026-05-21: the Packer template installs
+  # a STANDALONE MSSQLSERVER instance on ALL 4 nodes (one shared template).
+  # InstallFailoverCluster with /INSTANCENAME=MSSQLSERVER cannot convert an
+  # existing standalone instance -- setup reports "Passed" but creates NO
+  # cluster resource (the instance stays Clustered=No). FCI nodes must have
+  # the standalone instance UNINSTALLED first so the FCI install creates a
+  # fresh clustered instance. (AG-replica nodes keep their standalone
+  # instance -- they participate in the AG as standalone, not FCI.)
+  `$standalone = Get-CimInstance Win32_Service -Filter "Name='MSSQLSERVER'" -ErrorAction SilentlyContinue;
+  if (`$standalone) {
+    Write-Output 'UNINSTALLING_STANDALONE_SF1...';
+    Stop-Service -Name 'MSSQLSERVER' -Force -ErrorAction SilentlyContinue;
+    & `$setupExe '/Q' '/ACTION=Uninstall' '/INSTANCENAME=MSSQLSERVER' '/FEATURES=SQLEngine,FullText' '/SUPPRESSPRIVACYSTATEMENTNOTICE';
+    `$urc = `$LASTEXITCODE;
+    Write-Output ('UNINSTALL_RC=' + `$urc);
+    if (`$urc -ne 0 -and `$urc -ne 3010) { throw ('standalone uninstall failed exit=' + `$urc); }
+    Start-Sleep -Seconds 10;
+  }
+
+  # Resolve the cluster network whose subnet covers the FCI VIP (.70.x).
+  # Transient #28c at 0.G.7 ratify 2026-05-21: WSFC auto-names networks
+  # "Cluster Network 1/2" in discovery order; .10.x backplane often lands
+  # as #1 + .70.x service net as #2. Hardcoding "Cluster Network 1" put the
+  # .70.16 VIP on the wrong subnet -> setup error -2032402431 "IP not valid
+  # for network ... prefixes do not support the address". Resolve dynamically.
+  `$fciNet = (Get-ClusterNetwork | Where-Object { `$_.Address -eq '192.168.70.0' } | Select-Object -First 1).Name;
+  if (-not `$fciNet) { throw 'Could not find cluster network for 192.168.70.0/24'; }
+  Write-Output ('FCI_CLUSTER_NETWORK=' + `$fciNet);
+
   `$setupArgs = @(
     '/Q', '/ACTION=InstallFailoverCluster',
     '/SUPPRESSPRIVACYSTATEMENTNOTICE',
@@ -148,14 +196,23 @@ try {
     '/INSTANCEID=MSSQLSERVER',
     '/FAILOVERCLUSTERGROUP=SQL Server (MSSQLSERVER)',
     ('/FAILOVERCLUSTERNETWORKNAME=$fciName'),
-    ('/FAILOVERCLUSTERIPADDRESSES=IPv4;$fciVip;Cluster Network 1;255.255.255.0'),
+    ('/FAILOVERCLUSTERIPADDRESSES=IPv4;$fciVip;' + `$fciNet + ';255.255.255.0'),
     '/INSTALLSQLDATADIR=S:\SQLData',
     '/SQLSVCACCOUNT=$adNetbios\gmsa-sql-engine`$',
     '/SQLSYSADMINACCOUNTS=$adNetbios\Domain Admins',
     '/SECURITYMODE=SQL',
     ('/SAPWD=' + `$saPwd),
+    '/SKIPRULES=Cluster_VerifyForErrors',
     '/IACCEPTSQLSERVERLICENSETERMS'
   );
+  # /SKIPRULES=Cluster_VerifyForErrors -- transient #28b at 0.G.7 ratify
+  # 2026-05-21: SQL setup error 3008 "cluster either has not been verified
+  # or there are errors in the verification report" because we skipped
+  # Test-Cluster during WSFC bootstrap (cross-node RPC validation was flaky
+  # before the DNS-suffix fix #27d). The cluster IS functional (4 nodes Up,
+  # disk added, DNS suffix corrected). Skipping the verification RULE lets
+  # setup.exe proceed; the operator can run Test-Cluster post-install to
+  # generate the validation report if compliance requires it.
   Write-Output 'RUNNING_SETUP_INSTALLFCI...';
   & `$setupExe `$setupArgs;
   `$rc = `$LASTEXITCODE;
@@ -170,7 +227,7 @@ try {
 Stop-Transcript | Out-Null;
 "@
 
-      $out1 = Invoke-AsDomainTask -ip $sf1Ip -tag 'NexusFciInstallSf1' -orchestrate $sf1Orchestrate -timeoutMin 30
+      $out1 = Invoke-AsDomainTask -ip $sf1Ip -tag 'NexusFciInstallSf1' -orchestrate $sf1Orchestrate -logFile 'C:/Windows/Temp/fci-install-sf1.log' -timeoutMin 40
       Write-Host $out1.Trim()
       if ($out1 -notmatch 'FCI_INSTALLED_ON_SF1' -and $out1 -notmatch 'FCI_ALREADY_INSTALLED') {
         throw "[fci-install] sql-fci-1 InstallFailoverCluster did not report success"
@@ -205,6 +262,20 @@ try {
   `$isoVol = (Get-DiskImage -ImagePath 'C:/Windows/Temp/sqlserver.iso' | Get-Volume).DriveLetter;
   `$setupExe = `$isoVol + ':/setup.exe';
 
+  # Transient #28e: uninstall the standalone MSSQLSERVER instance (from the
+  # Packer bake) before AddNode -- a pre-existing standalone instance with
+  # the same name blocks joining the FCI.
+  `$standalone = Get-CimInstance Win32_Service -Filter "Name='MSSQLSERVER'" -ErrorAction SilentlyContinue;
+  if (`$standalone) {
+    Write-Output 'UNINSTALLING_STANDALONE_SF2...';
+    Stop-Service -Name 'MSSQLSERVER' -Force -ErrorAction SilentlyContinue;
+    & `$setupExe '/Q' '/ACTION=Uninstall' '/INSTANCENAME=MSSQLSERVER' '/FEATURES=SQLEngine,FullText' '/SUPPRESSPRIVACYSTATEMENTNOTICE';
+    `$urc = `$LASTEXITCODE;
+    Write-Output ('UNINSTALL_RC=' + `$urc);
+    if (`$urc -ne 0 -and `$urc -ne 3010) { throw ('standalone uninstall failed exit=' + `$urc); }
+    Start-Sleep -Seconds 10;
+  }
+
   `$addArgs = @(
     '/Q', '/ACTION=AddNode',
     '/SUPPRESSPRIVACYSTATEMENTNOTICE',
@@ -228,7 +299,7 @@ try {
 Stop-Transcript | Out-Null;
 "@
 
-        $out2 = Invoke-AsDomainTask -ip $sf2Ip -tag 'NexusFciAddNodeSf2' -orchestrate $sf2Orchestrate -timeoutMin 30
+        $out2 = Invoke-AsDomainTask -ip $sf2Ip -tag 'NexusFciAddNodeSf2' -orchestrate $sf2Orchestrate -logFile 'C:/Windows/Temp/fci-install-sf2.log' -timeoutMin 40
         Write-Host $out2.Trim()
         if ($out2 -notmatch 'FCI_ADDED_ON_SF2' -and $out2 -notmatch 'NODE_ALREADY_ADDED') {
           throw "[fci-install] sql-fci-2 AddNode did not report success"

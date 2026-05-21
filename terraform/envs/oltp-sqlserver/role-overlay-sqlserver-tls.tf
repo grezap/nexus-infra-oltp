@@ -47,8 +47,12 @@ resource "null_resource" "sqlserver_tls" {
       # SAN lists differ by role. FCI nodes carry the FCI virtual hostname
       # + IP in their cert; AG-replicas do not. All 4 get the listener cert
       # rendered to a separate dir.
+      # FCI nodes carry BOTH the WSFC cluster CNO name (sql-fci-cluster) AND
+      # the FCI virtual server name (sqlfci) in their cert SANs -- transient
+      # #28d: the two are distinct (cluster CNO != FCI virtual server name).
+      # Clients connect to the FCI via sqlfci.nexus.lab at .70.16.
       $sanList = if ($role -eq 'fci') {
-        "$hostName,$hostName.nexus.lab,$hostName.sqlserver.nexus.lab,sql-fci-cluster,sql-fci-cluster.nexus.lab,localhost"
+        "$hostName,$hostName.nexus.lab,$hostName.sqlserver.nexus.lab,sql-fci-cluster,sql-fci-cluster.nexus.lab,sqlfci,sqlfci.nexus.lab,localhost"
       } else {
         "$hostName,$hostName.nexus.lab,$hostName.sqlserver.nexus.lab,localhost"
       }

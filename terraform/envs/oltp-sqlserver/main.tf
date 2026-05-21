@@ -139,8 +139,15 @@ locals {
   fci_virtual_ip   = "192.168.70.16"
   ag_listener_ip   = "192.168.70.17"
   fci_cluster_name = "sql-fci-cluster"
-  ag_listener_name = "sql-ag-listener"
-  ag_name          = "nexus-ag"
+  # FCI virtual server (SQL network name) MUST differ from the WSFC cluster
+  # CNO name (fci_cluster_name) -- transient #28d at 0.G.7 ratify 2026-05-21:
+  # setup.exe /FAILOVERCLUSTERNETWORKNAME=sql-fci-cluster collided with the
+  # WSFC cluster's own Network Name resource (also sql-fci-cluster) ->
+  # "instance name already exists as a clustered resource" (-2068578302).
+  # The FCI virtual server is the client-facing SQL endpoint at .70.16.
+  fci_virtual_server_name = "sqlfci"
+  ag_listener_name        = "sql-ag-listener"
+  ag_name                 = "nexus-ag"
 
   # Sidecar JSON path on the build host (written by security env's
   # role-overlay-vault-agent-sqlserver-approles.tf).
