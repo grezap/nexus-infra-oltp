@@ -196,6 +196,12 @@ variable "vault_ca_bundle_path" {
   default     = "~/.nexus/vault-ca-bundle.crt"
 }
 
+variable "sql_iso_path" {
+  description = "Build-host absolute path to the SQL Server 2025 ISO. The fci-install overlay uploads it to C:/Windows/Temp/sqlserver.iso on each FCI node (sequential + size-verified + idempotent) BEFORE the InstallFailoverCluster/AddNode steps. The Packer bake removes the ISO post-install, so the FCI install must re-supply it -- automating this keeps the from-zero cold rebuild hands-off (no manual scp). Default matches memory/project_iso_directory.md (H:/VMS/ISO/)."
+  type        = string
+  default     = "H:/VMS/ISO/SqlServer2025EnterpriseDeveloperEdition.iso"
+}
+
 # ─── Stage versions (bump to trigger re-apply on a specific stage) ────────
 
 variable "sqlserver_nftables_v" {

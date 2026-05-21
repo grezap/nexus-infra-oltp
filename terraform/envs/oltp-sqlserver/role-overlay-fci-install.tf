@@ -50,6 +50,39 @@ resource "null_resource" "fci_install" {
       # FCI virtual server name (SQL network name) -- distinct from the WSFC
       # cluster CNO name to avoid the Network Name resource collision.
       $fciName   = '${local.fci_virtual_server_name}'
+      $sqlIsoPath = '${var.sql_iso_path}'
+
+      # ── Phase 0 (transient #28/#28j at 0.G.7 ratify 2026-05-21): upload the
+      #    SQL Server ISO to each FCI node. The Packer bake removes the ISO
+      #    post-standalone-install, so the FCI install must re-supply it.
+      #    Automating this keeps the from-zero cold rebuild hands-off (no
+      #    manual scp). SEQUENTIAL (one node at a time) + SIZE-VERIFIED per
+      #    transient #28 (parallel multi-GB scp stalled the VMware host I/O +
+      #    an unclean power-off truncated the in-flight writes; never trust
+      #    scp rc=0 alone). Idempotent: skips a node whose ISO already matches
+      #    the source byte count.
+      if (-not (Test-Path $sqlIsoPath)) {
+        throw "[fci-install] SQL ISO not found on build host at $sqlIsoPath (set var.sql_iso_path)"
+      }
+      $srcLen = (Get-Item $sqlIsoPath).Length
+      Write-Host "[fci-install] Phase 0: ensuring SQL ISO present on both FCI nodes ($srcLen bytes)..."
+      foreach ($fciNodeIp in @($sf1Ip, $sf2Ip)) {
+        $remoteLen = ssh -o ConnectTimeout=15 "$sshUser@$fciNodeIp" "(Get-Item 'C:/Windows/Temp/sqlserver.iso' -EA 0).Length" 2>$null
+        $remoteLen = ($remoteLen | Out-String).Trim()
+        if ($remoteLen -eq "$srcLen") {
+          Write-Host "[fci-install] Phase 0: $fciNodeIp already has the ISO ($remoteLen bytes; idempotent skip)"
+          continue
+        }
+        Write-Host "[fci-install] Phase 0: uploading ISO to $fciNodeIp (have='$remoteLen' want='$srcLen')..."
+        ssh -o ConnectTimeout=15 "$sshUser@$fciNodeIp" "Remove-Item 'C:/Windows/Temp/sqlserver.iso' -Force -EA 0" 2>$null
+        scp -o ConnectTimeout=30 $sqlIsoPath "$sshUser@$($fciNodeIp):C:/Windows/Temp/sqlserver.iso" 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "[fci-install] Phase 0: scp ISO to $fciNodeIp failed (rc=$LASTEXITCODE)" }
+        $verifyLen = (ssh -o ConnectTimeout=15 "$sshUser@$fciNodeIp" "(Get-Item 'C:/Windows/Temp/sqlserver.iso' -EA 0).Length" 2>$null | Out-String).Trim()
+        if ($verifyLen -ne "$srcLen") {
+          throw "[fci-install] Phase 0: ISO size mismatch on $fciNodeIp after upload (got '$verifyLen', want '$srcLen')"
+        }
+        Write-Host "[fci-install] Phase 0: $fciNodeIp ISO verified ($verifyLen bytes)"
+      }
 
       # Domain creds for the schtasks Password-logon-type dispatch.
       $adCredsJson = Join-Path $HOME ".nexus/nexusadmin-credentials.json"
