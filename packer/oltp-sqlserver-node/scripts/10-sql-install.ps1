@@ -336,3 +336,53 @@ if (-not $ok) {
     throw "MSSQLSERVER service did not reach Running + TCP-1433-listening within 30s"
 }
 Write-Host "=== 10-sql-install: engine reachable (service Running + TCP/1433 accepting) ==="
+
+# ── Install ODBC Driver 18 + the Command Line Utilities (sqlcmd/bcp) ──────────
+# COLD-REBUILD-CRITICAL (transient #30 at 0.G.7 ratify 2026-05-22): SQL Server
+# 2025 dropped the bundled sqlcmd.exe (#17), but EVERY terraform apply overlay
+# (fci-install, ag-bootstrap, ag-listener) AND smoke-0.G.7.ps1 shell out to
+# `sqlcmd` via the schtasks domain-task. During the first live ratification
+# sqlcmd + ODBC Driver 18 were installed MANUALLY -- a from-zero cold-rebuild
+# gap (a fresh template would have no sqlcmd, so fci-install would fail at its
+# first T-SQL call). Bake them into the template instead. We install the legacy
+# ODBC-based sqlcmd (Microsoft Command Line Utilities) -- NOT go-sqlcmd -- to
+# match the proven flag semantics the overlays use (`-E -C/-N -h -1 -W -b -i`).
+# The bake host has internet (it pulled windows_exporter + can reach
+# go.microsoft.com); pinned fwlink permalinks resolve to the latest GA MSI.
+$odbcMsiUrl   = $env:NEXUS_ODBC18_MSI_URL;   if (-not $odbcMsiUrl)   { $odbcMsiUrl   = 'https://go.microsoft.com/fwlink/?linkid=2358430' }  # ODBC Driver 18 x64 (18.6.x GA)
+$cmdlnMsiUrl  = $env:NEXUS_SQLCMD_MSI_URL;    if (-not $cmdlnMsiUrl)  { $cmdlnMsiUrl  = 'https://go.microsoft.com/fwlink/?linkid=2230791' }  # Command Line Utilities 15 x64 (sqlcmd + bcp)
+$dl = 'C:\Windows\Temp\nexus-sqltools'
+New-Item -ItemType Directory -Force -Path $dl | Out-Null
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+function Install-MsiFromUrl {
+    param([string]$url, [string]$fileName, [string]$extraProps)
+    $msi = Join-Path $dl $fileName
+    Write-Host "  - downloading $fileName ..."
+    Invoke-WebRequest -Uri $url -OutFile $msi -UseBasicParsing
+    if (-not (Test-Path $msi) -or (Get-Item $msi).Length -lt 100000) { throw "download of $fileName failed or too small" }
+    $log = Join-Path $dl ($fileName + '.log')
+    $msiArgs = "/i `"$msi`" /qn /norestart $extraProps /l*v `"$log`""
+    Write-Host "  - msiexec $fileName ($extraProps) ..."
+    $p = Start-Process -FilePath msiexec.exe -ArgumentList $msiArgs -Wait -PassThru
+    if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "$fileName install failed (exit=$($p.ExitCode); see $log)" }
+}
+
+Write-Host "=== 10-sql-install: installing ODBC Driver 18 + sqlcmd Command Line Utilities ==="
+Install-MsiFromUrl -url $odbcMsiUrl  -fileName 'msodbcsql18.msi'     -extraProps 'IACCEPTMSODBCSQLLICENSETERMS=YES'
+Install-MsiFromUrl -url $cmdlnMsiUrl -fileName 'MsSqlCmdLnUtils.msi' -extraProps 'IACCEPTMSSQLCMDLNUTILSLICENSETERMS=YES'
+
+# Refresh this session's PATH from the machine env (the MSIs append to it) +
+# verify sqlcmd resolves + runs. Fail the bake loudly if not -- a template
+# without sqlcmd would silently break every downstream apply overlay.
+$env:Path = [System.Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path', 'User')
+$sqlcmdCmd = Get-Command sqlcmd.exe -ErrorAction SilentlyContinue
+if (-not $sqlcmdCmd) {
+    # Fallback: probe the canonical ODBC Tools location directly.
+    $probe = Get-ChildItem 'C:\Program Files\Microsoft SQL Server\Client SDK\ODBC' -Recurse -Filter 'sqlcmd.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($probe) { $sqlcmdCmd = $probe }
+}
+if (-not $sqlcmdCmd) { throw "sqlcmd.exe not found on PATH after installing the Command Line Utilities -- bake aborted (downstream apply overlays require sqlcmd)" }
+$sqlcmdPath = if ($sqlcmdCmd.Source) { $sqlcmdCmd.Source } else { $sqlcmdCmd.FullName }
+Write-Host "=== 10-sql-install: sqlcmd installed at $sqlcmdPath ==="
+Remove-Item -Recurse -Force $dl -ErrorAction SilentlyContinue
