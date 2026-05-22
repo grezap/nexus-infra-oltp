@@ -228,6 +228,39 @@ Stop-Transcript | Out-Null;
       # WSFC service may need a moment to re-stabilize after the FCI-node reboots.
       Start-Sleep -Seconds 20
 
+      # ── Disk-prep (cold-rebuild fix #32 at 0.G.7 cold rebuild 2026-05-22):
+      #    ensure the clustered FCI disk is owned by sql-fci-1 + mounted as S:.
+      #    After WSFC Add-ClusterDisk + the Phase A reboots, (a) the "Available
+      #    Storage" group can be owned by ANY of the 4 WSFC nodes, and (b) the
+      #    iscsi-attach drive letter (S:) is stripped/drifted by Add-ClusterDisk
+      #    -- the disk comes back as E:. InstallFC on sql-fci-1 needs S: mounted
+      #    LOCALLY. Run via PLAIN SSH (local nexusadmin): Get-ClusterGroup +
+      #    Set-Partition work over plain SSH, whereas Get-ClusterResource hangs
+      #    in the schtasks domain-task context (#28n class). Set-Partition is a
+      #    storage cmdlet (no cluster dependency).
+      $diskPrep = @'
+$ErrorActionPreference = 'Continue'
+Import-Module FailoverClusters -ErrorAction SilentlyContinue
+$g = Get-ClusterGroup -Name 'Available Storage' -ErrorAction SilentlyContinue
+if ($g -and $g.OwnerNode.Name -ne $env:COMPUTERNAME) {
+  Move-ClusterGroup -Name 'Available Storage' -Node $env:COMPUTERNAME -ErrorAction SilentlyContinue | Out-Null
+  Start-Sleep -Seconds 8
+}
+$disk = Get-Disk | Where-Object { $_.BusType -eq 'iSCSI' } | Select-Object -First 1
+if ($disk) {
+  $data = Get-Partition -DiskNumber $disk.Number -ErrorAction SilentlyContinue | Where-Object { $_.Size -gt 1GB } | Select-Object -First 1
+  if ($data -and $data.DriveLetter -ne 'S') {
+    Set-Partition -DiskNumber $disk.Number -PartitionNumber $data.PartitionNumber -NewDriveLetter S -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 3
+  }
+}
+if (Test-Path 'S:\') { New-Item -ItemType Directory -Force -Path 'S:\SQLData' | Out-Null; Write-Output 'FCI_DISK_READY' } else { Write-Output 'FCI_DISK_FAIL' }
+'@
+      $dpB64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($diskPrep))
+      $dp = ssh -o ConnectTimeout=120 "$sshUser@$sf1Ip" "powershell -NoProfile -EncodedCommand $dpB64" 2>&1 | Out-String
+      Write-Host ("[fci-install] disk-prep on sql-fci-1: " + ($dp.Trim() -replace "`r?`n", ' '))
+      if ($dp -notmatch 'FCI_DISK_READY') { throw "[fci-install] disk-prep failed -- S: not mounted on sql-fci-1: $dp" }
+
       Write-Host "[fci-install] step 1/2: InstallFailoverCluster on sql-fci-1 (via Scheduled Task as $adUser)..."
 
       # ── sql-fci-1: InstallFailoverCluster orchestrate.
@@ -274,6 +307,17 @@ try {
   `$fciNet = (Get-ClusterNetwork | Where-Object { `$_.Address -eq '192.168.70.0' } | Select-Object -First 1).Name;
   if (-not `$fciNet) { throw 'Could not find cluster network for 192.168.70.0/24'; }
   Write-Output ('FCI_CLUSTER_NETWORK=' + `$fciNet);
+
+  # Cold-rebuild fix #31 (2026-05-22): create the /INSTALLSQLDATADIR root. The
+  # clustered disk's S: drive letter is (re-)assigned by the plain-SSH disk-prep
+  # step in the OUTER orchestration just before this task (#32: Add-ClusterDisk
+  # strips/drifts the iscsi-attach drive letter, so the disk comes back as E:,
+  # not S: -- a Set-Partition storage cmdlet over plain SSH fixes it; cluster
+  # RESOURCE cmdlets hang in this schtasks domain-task context). Here we only
+  # need S: mounted + the data-dir base created (setup makes the leaf subdirs).
+  if (-not (Test-Path 'S:\')) { throw 'S: not mounted on sql-fci-1 at InstallFC (disk-prep step did not assign the drive letter)'; }
+  New-Item -ItemType Directory -Force -Path 'S:\SQLData' | Out-Null;
+  Write-Output 'FCI_DATADIR_READY=S:\SQLData';
 
   `$setupArgs = @(
     '/Q', '/ACTION=InstallFailoverCluster',

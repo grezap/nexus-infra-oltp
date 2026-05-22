@@ -438,11 +438,17 @@ IF EXISTS (SELECT 1 FROM sys.availability_replicas ar JOIN sys.availability_grou
   ALTER AVAILABILITY GROUP [$agName] MODIFY REPLICA ON N'sql-ag-rep-1' WITH (SEEDING_MODE = MANUAL);
 IF EXISTS (SELECT 1 FROM sys.availability_replicas ar JOIN sys.availability_groups ag ON ar.group_id = ag.group_id WHERE ag.name = '$agName' AND ar.replica_server_name = 'sql-ag-rep-2' AND ar.seeding_mode <> 1)
   ALTER AVAILABILITY GROUP [$agName] MODIFY REPLICA ON N'sql-ag-rep-2' WITH (SEEDING_MODE = MANUAL);
--- add the DB to the AG if not already a member
+-- Take the FULL backup BEFORE adding the DB to the AG. Cold-rebuild fix #33
+-- (2026-05-22): ALTER AVAILABILITY GROUP ADD DATABASE on a BRAND-NEW database
+-- fails Msg 1475 "...create a full backup on the primary..." -- a DB must have
+-- a full backup (recovery/LSN baseline established) before it can join an AG.
+-- The forward ratification masked this (nexus_demo already had a backup from
+-- the earlier failed auto-seed). Order: full backup -> ADD DATABASE -> log
+-- backup (the .bak/.trn pair is the manual-seed base for the replicas).
+BACKUP DATABASE nexus_demo TO DISK = 'C:\Windows\Temp\nexus_demo.bak' WITH INIT, FORMAT;
+-- add the DB to the AG if not already a member (now allowed -- has a full backup)
 IF NOT EXISTS (SELECT 1 FROM sys.availability_databases_cluster adc JOIN sys.availability_groups ag ON adc.group_id = ag.group_id WHERE ag.name = '$agName' AND adc.database_name = 'nexus_demo')
   ALTER AVAILABILITY GROUP [$agName] ADD DATABASE nexus_demo;
--- fresh backup base (FULL + LOG) for manual seeding of the replicas
-BACKUP DATABASE nexus_demo TO DISK = 'C:\Windows\Temp\nexus_demo.bak' WITH INIT, FORMAT;
 BACKUP LOG nexus_demo TO DISK = 'C:\Windows\Temp\nexus_demo.trn' WITH INIT, FORMAT;
 SELECT 'BACKUP_DONE';
 "@
