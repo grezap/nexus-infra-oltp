@@ -90,6 +90,68 @@ function Invoke-RemoteWin([string]$hostName, [string]$cmd, [int]$timeout = 30) {
         "$SshUser@$hostName" "powershell -NoProfile -EncodedCommand $b64" 2>&1 | Out-String
 }
 
+# ── Domain creds for the schtasks Password-logon-type SQL dispatch ──────────
+# T-SQL against the FCI must run as NEXUS\nexusadmin (the only sysadmin on the
+# FCI -- a plain SSH `sqlcmd -E` runs as the LOCAL nexusadmin which is sysadmin
+# only on the standalone replicas). Mirrors the ag-bootstrap Invoke-Tsql.
+$script:AdUser = $null; $script:AdPass = $null
+$adCredsJson = Join-Path $HOME ".nexus/nexusadmin-credentials.json"
+if (Test-Path $adCredsJson) {
+    $adCreds = Get-Content $adCredsJson -Raw | ConvertFrom-Json
+    $adNetbios = if ($adCreds.PSObject.Properties['netbios']) { $adCreds.netbios } else { 'NEXUS' }
+    $script:AdUser = "$adNetbios\$($adCreds.username)"
+    $script:AdPass = $adCreds.password
+}
+
+# Run a T-SQL query on $ip as NEXUS\nexusadmin via a Scheduled Task; -S $server
+# (e.g. 'sqlfci' for the FCI, '.' for a replica, 'sql-ag-listener' for the
+# Listener). sqlcmd -C trusts the server cert (lab; SslStream §11 does strict
+# chain validation separately). Returns the sqlcmd stdout (transcript-stripped).
+function Invoke-Sql([string]$ip, [string]$server, [string]$tsql, [int]$timeoutMin = 5, [string]$encFlag = '-C') {
+    # $encFlag: '-C' = encrypt + TrustServerCertificate (bootstrap/ops); '-N' =
+    # encrypt + strict server-cert chain validation (TrustServerCertificate=no).
+    if (-not $script:AdUser) { return 'NO_AD_CREDS' }
+    $tag = 'smk-' + [System.Guid]::NewGuid().ToString('N').Substring(0, 8)
+    $tsqlB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($tsql))
+    $logFile = "C:/Windows/Temp/$tag.log"
+    $orchestrate = @"
+`$ErrorActionPreference = 'Continue';
+Start-Transcript -Path '$logFile' -Force | Out-Null;
+`$q = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$tsqlB64'));
+`$tmp = 'C:\Windows\Temp\$tag.sql';
+Set-Content -Path `$tmp -Value `$q -Encoding UTF8;
+& sqlcmd -S '$server' -E $encFlag -h -1 -W -b -i `$tmp;
+Remove-Item `$tmp -ErrorAction SilentlyContinue;
+Stop-Transcript | Out-Null;
+"@
+    $wrapper = @"
+`$ErrorActionPreference = 'Continue';
+`$sp = 'C:/Windows/Temp/$tag-o.ps1'; `$lp = '$logFile';
+Remove-Item `$lp,`$sp -ErrorAction SilentlyContinue;
+@'
+$orchestrate
+'@ | Set-Content -Path `$sp -Encoding UTF8;
+try { schtasks /Delete /TN $tag /F 2>&1 | Out-Null } catch {};
+schtasks /Create /TN $tag /TR "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `$sp" /SC ONCE /ST 23:59 /RU '$($script:AdUser)' /RP '$($script:AdPass)' /RL HIGHEST /F | Out-Null;
+schtasks /Run /TN $tag | Out-Null;
+`$dl = (Get-Date).AddMinutes($timeoutMin);
+do { Start-Sleep -Seconds 5; if (Test-Path `$lp) { if ((Get-Content `$lp -Raw -EA SilentlyContinue) -match 'transcript end') { break } } } while ((Get-Date) -lt `$dl);
+Start-Sleep -Seconds 1;
+if (Test-Path `$lp) { Get-Content `$lp -Raw }
+try { schtasks /Delete /TN $tag /F 2>&1 | Out-Null } catch {};
+Remove-Item `$sp -ErrorAction SilentlyContinue;
+"@
+    $tmpLocal = Join-Path $env:TEMP "$tag-w.ps1"
+    $wrapper | Out-File -FilePath $tmpLocal -Encoding UTF8 -Force
+    $rs = "C:/Windows/Temp/nexus-$tag-w.ps1"
+    & scp -o ConnectTimeout=30 -o BatchMode=yes $tmpLocal "$SshUser@$($ip):$rs" 2>&1 | Out-Null
+    Remove-Item $tmpLocal -ErrorAction SilentlyContinue
+    $out = & ssh -o ConnectTimeout=120 -o BatchMode=yes "$SshUser@$ip" "powershell -NoProfile -ExecutionPolicy Bypass -File $rs" 2>&1 | Out-String
+    & ssh -o ConnectTimeout=10 -o BatchMode=yes "$SshUser@$ip" "Remove-Item -Path '$rs' -ErrorAction SilentlyContinue" 2>&1 | Out-Null
+    # strip transcript banner lines, return just the result rows
+    ($out -split "`n" | Where-Object { $_ -notmatch '^\*{5,}|transcript|^Start time|^End time|^Username|^RunAs|^Configuration Name|^Machine|^Host Application|^Process ID|^PSVersion|^PSEdition|^PSCompatible|^BuildVersion|^CLRVersion|^WSManStack|^PSRemoting|^Serialization' }) -join "`n"
+}
+
 function Section([int]$n, [string]$title, [scriptblock]$body) {
     if ($Skip -contains $n) {
         Write-Host ""
@@ -128,19 +190,33 @@ Section 2 'domain-join (PartOfDomain + AD group membership)' {
             if ($out -match '^nexus\.lab') { 'OK' } else { "domain=$($out.Trim())" }
         }
     }
-    Check 'all 4 computer accounts in nexus-sql-cluster-members AD group' {
-        $out = Invoke-RemoteWin '192.168.70.240' "Get-ADGroupMember nexus-sql-cluster-members | Select-Object -ExpandProperty Name | Sort-Object | Out-String"
-        $found = ($nodes.Keys | Where-Object { $out -match "$_$" }).Count
-        if ($found -ge 4) { 'OK' } else { "found $found/4: $out" }
+    Check 'FCI computer accounts in nexus-sql-cluster-members AD group (gmsa consumers)' {
+        # Only the FCI nodes RUN the gmsa (replicas use NT AUTHORITY\NETWORK
+        # SERVICE by design), so only sql-fci-1$/sql-fci-2$ need to retrieve the
+        # gmsa managed password. Robust contains-match (the members list shows
+        # SAM names like SQL-FCI-1$).
+        $out = Invoke-RemoteWin '192.168.70.240' "Get-ADGroupMember nexus-sql-cluster-members | Select-Object -ExpandProperty SamAccountName | Out-String"
+        $fci = @('sql-fci-1','sql-fci-2')
+        $found = ($fci | Where-Object { $out -match [regex]::Escape($_) }).Count
+        if ($found -ge 2) { 'OK' } else { "found $found/2 FCI accounts: $($out.Trim())" }
     }
 }
 
-# ── Section 3: identity (GMSA) ───────────────────────────────────────────
-Section 3 'identity (gmsa-sql-engine runs MSSQLSERVER service)' {
+# ── Section 3: identity (GMSA on FCI; NETWORK SERVICE on replicas) ────────
+Section 3 'identity (gmsa-sql-engine runs the FCI; NETWORK SERVICE the replicas)' {
+    # The FCI SQL service moves to nexus.lab\gmsa-sql-engine$ at FCI install
+    # (cluster-shared identity). The standalone AG replicas keep the Packer
+    # default NT AUTHORITY\NETWORK SERVICE (AG endpoints use cert auth, not the
+    # service account, so a gmsa on the replicas buys nothing). Per-role expect.
     foreach ($entry in $nodes.GetEnumerator()) {
-        Check "$($entry.Key) MSSQLSERVER service identity = gmsa-sql-engine`$" {
+        $expectGmsa = ($entry.Value.role -eq 'fci')
+        Check "$($entry.Key) MSSQLSERVER identity = $(if ($expectGmsa) { 'gmsa-sql-engine$' } else { 'NETWORK SERVICE' })" {
             $out = Invoke-RemoteWin $entry.Value.ip "(Get-CimInstance Win32_Service -Filter `"Name='MSSQLSERVER'`").StartName"
-            if ($out -match 'gmsa-sql-engine') { 'OK' } else { "service identity=$($out.Trim())" }
+            if ($expectGmsa) {
+                if ($out -match 'gmsa-sql-engine') { 'OK' } else { "service identity=$($out.Trim())" }
+            } else {
+                if ($out -match 'NETWORK\s*SERVICE') { 'OK' } else { "service identity=$($out.Trim())" }
+            }
         }
     }
 }
@@ -159,32 +235,41 @@ Section 4 'vault-agent (service Running + creds rendered)' {
     }
 }
 
-# ── Section 5: TLS material ──────────────────────────────────────────────
-Section 5 'TLS (per-node + listener cert in LocalMachine\My)' {
+# ── Section 5: TLS material (unified per-node cert) ──────────────────────
+Section 5 'TLS (unified per-node cert in My with listener SAN + .17; CA chain)' {
+    # One cert per instance carries every name it serves: CN=<host>.sqlserver
+    # + the AG Listener SAN (sql-ag-listener.nexus.lab) + the .17 IP-SAN (the
+    # Listener IP follows the AG primary across failover). No separate listener
+    # cert -- SQL binds a single SuperSocketNetLib\Certificate.
     foreach ($entry in $nodes.GetEnumerator()) {
-        Check "$($entry.Key) node cert in LocalMachine\My" {
-            $out = Invoke-RemoteWin $entry.Value.ip "(Get-ChildItem Cert:/LocalMachine/My | Where-Object Subject -match `"CN=$($entry.Key).sqlserver.nexus.lab`").Count"
-            if ($out -match '\b1\b') { 'OK' } else { "count=$($out.Trim())" }
+        $h = $entry.Key
+        Check "$h unified cert in My (CN=$h.sqlserver + sql-ag-listener SAN + .17)" {
+            $ps = "(@(Get-ChildItem Cert:\LocalMachine\My | Where-Object { `$_.Subject -eq 'CN=$h.sqlserver.nexus.lab' -and `$_.HasPrivateKey -and (`$_.DnsNameList.Unicode -contains 'sql-ag-listener.nexus.lab') -and ((`$_.Extensions | Where-Object { `$_.Oid.Value -eq '2.5.29.17' }).Format(`$false) -match '192\.168\.70\.17') })).Count"
+            $out = Invoke-RemoteWin $entry.Value.ip $ps
+            if ($out -match '[1-9]') { 'OK' } else { "matching cert count=$($out.Trim())" }
         }
-        Check "$($entry.Key) listener cert in LocalMachine\My (IP-SAN .17)" {
-            $out = Invoke-RemoteWin $entry.Value.ip "(Get-ChildItem Cert:/LocalMachine/My | Where-Object Subject -match 'CN=sql-ag-listener\.nexus\.lab').Count"
-            if ($out -match '\b1\b') { 'OK' } else { "count=$($out.Trim())" }
+        Check "$h NexusPlatform CA chain present (Root + Intermediate)" {
+            $ps = "[string]((Get-ChildItem Cert:\LocalMachine\Root | Where-Object { `$_.Subject -match 'NexusPlatform Root' }).Count) + '/' + [string]((Get-ChildItem Cert:\LocalMachine\CA | Where-Object { `$_.Subject -match 'NexusPlatform Intermediate' }).Count)"
+            $out = Invoke-RemoteWin $entry.Value.ip $ps
+            if ($out -match '[1-9]/[1-9]') { 'OK' } else { "root/intermediate=$($out.Trim())" }
         }
     }
 }
 
-# ── Section 6: iSCSI session (FCI pair only) ─────────────────────────────
-Section 6 'iSCSI (LUN visible as CSV on FCI pair)' {
+# ── Section 6: iSCSI session + FCI shared Physical Disk ──────────────────
+Section 6 'iSCSI (LUN attached on FCI pair; clustered Physical Disk Online)' {
     foreach ($hostName in @('sql-fci-1','sql-fci-2')) {
         $ip = $nodes[$hostName].ip
         Check "$hostName iSCSI session to sql-fci.lun1 active" {
-            $out = Invoke-RemoteWin $ip "(Get-IscsiSession | Where-Object TargetNodeAddress -match 'sql-fci.lun1').Count"
-            if ($out -match '\b1\b') { 'OK' } else { "session count=$($out.Trim())" }
+            $out = Invoke-RemoteWin $ip "@(Get-IscsiSession | Where-Object { `$_.TargetNodeAddress -match 'sql-fci' }).Count"
+            if ($out -match '[1-9]') { 'OK' } else { "session count=$($out.Trim())" }
         }
     }
-    Check 'iSCSI LUN visible as Cluster Shared Volume on sql-fci-1' {
-        $out = Invoke-RemoteWin '192.168.70.11' "(Get-ClusterSharedVolume | Where-Object State -eq 'Online').Count"
-        if ($out -match '\b1\b') { 'OK' } else { "online CSVs=$($out.Trim())" }
+    # FCI uses the iSCSI LUN as a clustered Physical Disk (NOT a CSV -- a single-
+    # instance FCI takes the disk as a dedicated cluster resource, not shared).
+    Check 'iSCSI LUN online as a clustered Physical Disk' {
+        $out = Invoke-RemoteWin '192.168.70.11' "@(Get-ClusterResource | Where-Object { `$_.ResourceType -eq 'Physical Disk' -and `$_.State -eq 'Online' }).Count"
+        if ($out -match '[1-9]') { 'OK' } else { "online Physical Disk resources=$($out.Trim())" }
     }
 }
 
@@ -217,68 +302,71 @@ Section 8 'FCI install (sql-fci-cluster role Online at .16)' {
     }
 }
 
-# ── Section 9: AG sync state ─────────────────────────────────────────────
-Section 9 'AG synchronization state per replica' {
-    $tsql = "SELECT ar.replica_server_name + ':' + drs.synchronization_state_desc FROM sys.dm_hadr_database_replica_states drs JOIN sys.availability_replicas ar ON drs.replica_id = ar.replica_id"
-    $out = Invoke-RemoteWin '192.168.70.11' "sqlcmd -E -h -1 -W -Q `"$tsql`""
-    Check 'FCI replica SYNCHRONIZED' { if ($out -match "$fciCluster.*SYNCHRONIZED") { 'OK' } else { $out.Trim() } }
-    Check 'sql-ag-rep-1 SYNCHRONIZING (async)' { if ($out -match 'sql-ag-rep-1.*SYNCHRONIZ') { 'OK' } else { $out.Trim() } }
-    Check 'sql-ag-rep-2 SYNCHRONIZING (async)' { if ($out -match 'sql-ag-rep-2.*SYNCHRONIZ') { 'OK' } else { $out.Trim() } }
+# ── Section 9: AG sync state (via domain-task on the FCI primary) ─────────
+Section 9 'AG synchronization state per replica (nexus_demo)' {
+    $tsql = "SET NOCOUNT ON; SELECT ar.replica_server_name + '|' + ISNULL(drs.synchronization_state_desc,'?') + '|' + ISNULL(drs.synchronization_health_desc,'?') + '|p' + CAST(drs.is_primary_replica AS varchar(2)) FROM sys.dm_hadr_database_replica_states drs JOIN sys.availability_replicas ar ON drs.replica_id = ar.replica_id WHERE DB_NAME(drs.database_id) = 'nexus_demo'"
+    $out = Invoke-Sql '192.168.70.11' 'sqlfci' $tsql
+    Check 'FCI is the AG primary for nexus_demo' { if ($out -match '(?im)sqlfci\|.*\|p1') { 'OK' } else { $out.Trim() } }
+    Check 'sql-ag-rep-1 SYNCHRONIZING + HEALTHY' { if ($out -match '(?im)sql-ag-rep-1\|SYNCHRONIZ\w*\|HEALTHY') { 'OK' } else { $out.Trim() } }
+    Check 'sql-ag-rep-2 SYNCHRONIZING + HEALTHY' { if ($out -match '(?im)sql-ag-rep-2\|SYNCHRONIZ\w*\|HEALTHY') { 'OK' } else { $out.Trim() } }
 }
 
 # ── Section 10: AG Listener owned ────────────────────────────────────────
-Section 10 'AG Listener (.17 bound on the current primary)' {
+Section 10 'AG Listener (.17 bound; AG cluster group Online)' {
     Check 'Listener IP .17 ping' {
         if (Test-Connection -ComputerName $vips.listener -Count 2 -Quiet) { 'OK' } else { 'no ping' }
     }
-    Check "Get-ClusterGroup $listenerName Online" {
-        $out = Invoke-RemoteWin '192.168.70.11' "(Get-ClusterGroup -Name $listenerName).State"
+    # The Listener's IP + Network Name resources live in the AG's cluster group
+    # (named after the AG, 'nexus-ag') -- not a standalone 'sql-ag-listener'
+    # group. The group is Online on the current AG primary (the FCI).
+    Check "AG cluster group '$agName' Online" {
+        $out = Invoke-RemoteWin '192.168.70.11' "(Get-ClusterGroup -Name '$agName').State"
         if ($out -match 'Online') { 'OK' } else { "state=$($out.Trim())" }
+    }
+    Check 'Listener IP Address resource Online in the cluster' {
+        $out = Invoke-RemoteWin '192.168.70.11' "@(Get-ClusterResource | Where-Object { `$_.ResourceType -eq 'IP Address' -and `$_.OwnerGroup.Name -eq '$agName' -and `$_.State -eq 'Online' }).Count"
+        if ($out -match '[1-9]') { 'OK' } else { "online listener IP resources=$($out.Trim())" }
     }
 }
 
-# ── Section 11: Listener IP-SAN cert verification ────────────────────────
-Section 11 'Listener cert IP-SAN .17 validates via SslStream' {
-    Check 'SslStream handshake against .17:1433 + chain valid' {
-        try {
-            $tcp = New-Object System.Net.Sockets.TcpClient
-            $tcp.Connect($vips.listener, 1433)
-            $stream = $tcp.GetStream()
-            $ssl = New-Object System.Net.Security.SslStream($stream, $false, {
-                param($sender, $cert, $chain, $errors)
-                $true # accept any -- we check chain explicitly below
-            })
-            $ssl.AuthenticateAsClient($listenerName)
-            $cert = $ssl.RemoteCertificate
-            if ($cert.Subject -match 'CN=sql-ag-listener') { 'OK' } else { "subject=$($cert.Subject)" }
-            $ssl.Close(); $tcp.Close()
-        } catch { "exception: $($_.Exception.Message)" }
+# ── Section 11: Listener strict-TLS validation (Encrypt + validate chain) ─
+Section 11 'Listener cert validates under strict TLS (remote domain client)' {
+    # Connect to the Listener FQDN from a REMOTE node (sql-ag-rep-1) as a domain
+    # user with sqlcmd -N (Encrypt=Mandatory + TrustServerCertificate=no). This
+    # exercises the real client path: the unified cert's chain (leaf -> Nexus
+    # Intermediate -> Root, with the Intermediate sent by Schannel + Root
+    # trusted) AND the SAN (sql-ag-listener.nexus.lab / .17) must both validate,
+    # else ODBC Driver 18 refuses the connection. Proves HA-promise-covers-LB.
+    Check 'remote sqlcmd -S sql-ag-listener.nexus.lab -E -N (strict cert validate)' {
+        $out = Invoke-Sql '192.168.70.13' 'sql-ag-listener.nexus.lab' "SET NOCOUNT ON; SELECT 'TLSOK=' + @@SERVERNAME" 5 '-N'
+        if ($out -match 'TLSOK=') { 'OK' } else { "strict-TLS connect failed: $($out.Trim())" }
     }
 }
 
 # ── Section 12: sqlcmd via Listener returns primary ──────────────────────
 Section 12 'sqlcmd via Listener returns current primary' {
-    Check 'sqlcmd -S sql-ag-listener,1433 SELECT @@SERVERNAME' {
-        $out = Invoke-RemoteWin '192.168.70.11' "sqlcmd -E -S $listenerName,1433 -Q `"SELECT @@SERVERNAME`" -h -1 -W"
-        if ($out -match 'sql-') { 'OK' } else { "result=$($out.Trim())" }
+    Check 'remote sqlcmd via Listener returns the AG primary (@@SERVERNAME)' {
+        $out = Invoke-Sql '192.168.70.13' $listenerName "SET NOCOUNT ON; SELECT 'PRIMARY=' + @@SERVERNAME"
+        if ($out -match 'PRIMARY=SQLFCI') { 'OK' } else { "result=$($out.Trim())" }
     }
 }
 
-# ── Section 13: ADR-0025 5-step Listener failover sequence ───────────────
-Section 13 'ADR-0025 Listener failover sequence' {
-    Check '[step 1] both nodes responding to backend probes' {
-        $out11 = Invoke-RemoteWin '192.168.70.11' "(Get-Service MSSQLSERVER).Status"
-        $out12 = Invoke-RemoteWin '192.168.70.12' "(Get-Service MSSQLSERVER).Status"
-        if ($out11 -match 'Running' -and $out12 -match 'Running') { 'OK' } else { "fci-1=$out11 fci-2=$out12" }
+# ── Section 13: ADR-0025 Listener failover readiness (non-disruptive) ─────
+Section 13 'ADR-0025 Listener failover readiness' {
+    Check '[step 1] FCI virtual server (AG primary backend) answering' {
+        # An FCI runs MSSQLSERVER only on the ACTIVE owner node (the passive
+        # node's service is Stopped -- that is normal). Probe the virtual server
+        # instead of both nodes' services.
+        $out = Invoke-Sql '192.168.70.11' 'sqlfci' "SET NOCOUNT ON; SELECT 'UP=' + @@SERVERNAME"
+        if ($out -match 'UP=SQLFCI') { 'OK' } else { "fci backend not answering: $($out.Trim())" }
     }
-    Check '[step 2] Listener bound on exactly one node' {
-        # ADR-0025 acceptance: Get-ClusterGroup state Online on the current owner
-        $out = Invoke-RemoteWin '192.168.70.11' "(Get-ClusterGroup -Name '$agName').OwnerNode"
-        if ($out -match '^sql-') { 'OK' } else { "owner=$($out.Trim())" }
+    Check '[step 2] AG group owned by exactly one cluster node' {
+        $out = Invoke-RemoteWin '192.168.70.11' "(Get-ClusterGroup -Name '$agName').OwnerNode.Name"
+        if ($out -match '(?m)^sql-') { 'OK' } else { "owner=$($out.Trim())" }
     }
-    # Steps 3-5 (trigger failover + verify + restore) are disruptive --
-    # exercised in the failover demo (demo-0.G.7-sql-ag-failover.json),
-    # not in the smoke gate (which should be idempotent + non-disruptive).
+    # Steps 3-5 (trigger failover + verify Listener moved + restore) are
+    # disruptive -- exercised in the failover demo (demo-0.G.7-sql-ag-failover),
+    # not in the smoke gate (which is idempotent + non-disruptive).
     Check '[steps 3-5] disruptive failover deferred to demo' {
         Write-Host '       (run nexus demo run sql-ag-failover for the full 5-step sequence)' -ForegroundColor Yellow
         'OK'
@@ -288,8 +376,8 @@ Section 13 'ADR-0025 Listener failover sequence' {
 # ── Section 14: FCI failover (disruptive; deferred to demo) ──────────────
 Section 14 'FCI failover (disruptive; deferred to demo)' {
     Check 'FCI ownership query (no-op probe)' {
-        $out = Invoke-RemoteWin '192.168.70.11' "(Get-ClusterGroup -Name 'SQL Server (MSSQLSERVER)').OwnerNode"
-        if ($out -match '^sql-fci-') { 'OK' } else { "owner=$($out.Trim())" }
+        $out = Invoke-RemoteWin '192.168.70.11' "(Get-ClusterGroup -Name 'SQL Server (MSSQLSERVER)').OwnerNode.Name"
+        if ($out -match '(?m)^sql-fci-') { 'OK' } else { "owner=$($out.Trim())" }
     }
     Check '[fci-failover] disruptive Move-ClusterGroup deferred to demo' {
         Write-Host '       (run nexus demo run sql-fci-failover for the full Move-ClusterGroup sequence)' -ForegroundColor Yellow
@@ -301,7 +389,7 @@ Section 14 'FCI failover (disruptive; deferred to demo)' {
 Write-Host ""
 Write-Host "═══ smoke-0.G.7 summary ═══" -ForegroundColor Cyan
 Write-Host "  PASSED:  $($script:Passes)" -ForegroundColor Green
-Write-Host "  FAILED:  $($script:Failures.Count)" -ForegroundColor (if ($script:Failures.Count -eq 0) { 'Green' } else { 'Red' })
+Write-Host "  FAILED:  $($script:Failures.Count)" -ForegroundColor $(if ($script:Failures.Count -eq 0) { 'Green' } else { 'Red' })
 
 if ($script:Failures.Count -eq 0) {
     Write-Host ""
