@@ -4,8 +4,10 @@
 > five OLTP cluster sub-phases shipped per-cluster + per-engine.
 > 0.G.1+0.G.2+0.G.3+0.G.3.5 **PROVEN cold-rebuildable (2026-05-18)**; 0.G.4
 > (Patroni + etcd + HAProxy) closed 2026-05-19; **0.G.7 (SQL Server FCI +
-> Always On AG on Windows Server 2025) scaffolded 2026-05-20**, ratification
-> pending. With 0.G.7 the OLTP tier is SEALED (5/5 clusters):
+> Always On AG on Windows Server 2025) LIVE-RATIFIED 2026-05-22 — smoke
+> `smoke-0.G.7.ps1` ALL GREEN (56/56)**; all 40+ ratification transients
+> root-caused + fixed in source (cold-rebuild-ready). With 0.G.7 the OLTP
+> tier is SEALED (5/5 clusters):
 >
 > - **0.G.1** (6-node Redis Cluster mTLS) — smoke ALL GREEN on
 >   `envs/oltp-redis/` via `oltp-redis-node.vmx`.
@@ -28,20 +30,26 @@
 >   end-to-end (full chronology in §3.4); all permanent fixes baked into
 >   per-engine Ansible roles, per-cluster TF overlays, and the smoke gate.
 >
-> - **0.G.7** (2 SQL Server FCI nodes sharing iSCSI LUN + 2 AG async
+> - **0.G.7** (2 SQL Server FCI nodes sharing an iSCSI LUN + 2 AG async
 >   replicas; 4 ws2025-desktop nodes + 3 WSFC-managed VIPs:
->   cluster `.70.15`, FCI `.70.16`, AG Listener `.70.17`) — **scaffolded
->   2026-05-20**, ratification pending. SQL Server 2022 Developer Edition
->   (MSDN per ADR-0144); WSFC quorum=NodeMajority across all 4; FCI shares
->   iSCSI LUN via tgt target on nexus-gateway (per ADR-0026); AG endpoint
->   auth = certificate-based per ADR-0027; Listener cert IP-SAN .17
->   validates client TLS across failover (per ADR-0025); SQL service runs
->   as `nexus.lab\gmsa-sql-engine$` GMSA (Phase 0.G.7 is the first
->   real GMSA consumer; 0.D.5 scaffolded the infrastructure). Hybrid
->   FCI+AG architecture sealed with Greg 2026-05-20 — see memory entry
->   `project_nexus_infra_oltp_0g7_phase`. Ratification will surface the
->   transient chronology in §3.5 (empty at scaffold; the lab's first
->   Windows-fleet sub-phase will have its own discoveries).
+>   cluster `.70.15`, FCI virtual server `sqlfci` `.70.16`, AG Listener
+>   `sql-ag-listener` `.70.17`) — **LIVE 2026-05-22**. WSFC
+>   quorum=NodeMajority across all 4; FCI shares an iSCSI LUN (clustered
+>   Physical Disk) via a tgt target on nexus-gateway (per ADR-0026); AG
+>   `nexus-ag` = FCI primary + 2 async replicas **SYNCHRONIZING + HEALTHY**
+>   (`nexus_demo` DB replicated; **MANUAL seeding** — FCI DBs on shared `S:\`
+>   vs replicas on local `C:\`); AG endpoint auth = certificate-based per
+>   ADR-0027; Listener strict-TLS proven — a remote domain client
+>   `sqlcmd -S sql-ag-listener.nexus.lab -E -N` (Encrypt + validate chain)
+>   returns the primary (per ADR-0025); a unified per-node Vault-PKI cert
+>   carries every SAN the instance serves (node + FCI virtual + listener +
+>   `.16`/`.17`) with the CA chain imported to `My`/`CA`/`Root`; FCI SQL
+>   service runs as `nexus.lab\gmsa-sql-engine$` GMSA (0.G.7 is the first
+>   real GMSA consumer), AG replicas as `NT AUTHORITY\NETWORK SERVICE`
+>   (endpoints use cert auth); Kerberos SPNs for the FCI + Listener virtual
+>   names registered on the gmsa. Hybrid FCI+AG architecture sealed with
+>   Greg 2026-05-20 — see memory `project_nexus_infra_oltp_0g7_phase`. Full
+>   ratification transient chronology in §3.5b + §3.5c (40+ transients).
 >
 > Cold-rebuild surfaced **11 additional transients** beyond the 16 from
 > the legacy monolithic 0.G.3 attempt; all root-caused + permanent fixes
@@ -591,13 +599,14 @@ end-to-end after the smoke gate passes.
 
 (Table grows as new transients surface during future cycles.)
 
-### §3.5 0.G.7 scaffold notes + pending ratification
+### §3.5 0.G.7 scaffold notes + ratification
 
-**Status (2026-05-20):** scaffolded; ratification + transient chronology
-pending. The 0.G.7 work is the first NexusPlatform sub-phase delivering a
-**Windows-fleet** data cluster (vs the 6 Linux clusters in 0.G.1-0.G.4 +
-0.H.* + 0.E.*). It exercises previously-scaffolded-but-unused
-infrastructure for the first time:
+**Status (2026-05-22): LIVE-RATIFIED — smoke `smoke-0.G.7.ps1` ALL GREEN
+(56/56).** WSFC + FCI + AG + Listener all live; transient chronology in
+§3.5b (terraform apply) + §3.5c (cluster bring-up). The 0.G.7 work is the
+first NexusPlatform sub-phase delivering a **Windows-fleet** data cluster
+(vs the 6 Linux clusters in 0.G.1-0.G.4 + 0.H.* + 0.E.*). It exercises
+previously-scaffolded-but-unused infrastructure for the first time:
 
 - **GMSA** — `gmsa-sql-engine$` is the first real consumer of the GMSA
   scaffolding from 0.D.5. Per `memory/feedback_kds_rootkey_server2025_ssh.md`,
