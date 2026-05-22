@@ -46,7 +46,7 @@ jobs:
           - oltp-patroni-node    # Phase 0.G.4 per-engine (PostgreSQL + Patroni)
           - oltp-etcd-node       # Phase 0.G.4 per-engine (etcd DCS for Patroni)
           - oltp-haproxy-node    # Phase 0.G.4 per-engine (HAProxy + keepalived for PG)
-          - oltp-sqlserver-node  # Phase 0.G.7 per-engine (WS2025 + SQL 2022 Developer + WSFC)
+          - oltp-sqlserver-node  # Phase 0.G.7 per-engine (WS2025 + SQL Server 2025 Developer + WSFC)
     steps:
       - uses: actions/checkout@v4
 

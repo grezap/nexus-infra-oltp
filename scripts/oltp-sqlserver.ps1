@@ -9,8 +9,8 @@
   iSCSI LUN + 2 async AG replicas = 4 VMs on the 02-sqlserver tier, with
   3 WSFC-managed VIPs: cluster .15, FCI .16, Listener .17). All 4 nodes
   use the dedicated oltp-sqlserver-node Packer template (Windows Server
-  2025 Desktop + SQL Server 2022 Developer Edition + Failover-Clustering
-  + iSCSI-Initiator + MPIO features).
+  2025 Desktop + SQL Server 2025 Developer Edition + Failover-Clustering
+  + MPIO features + built-in msiscsi initiator).
 
   Pre-flight (from outside this wrapper):
     1. nexus-infra-vmware foundation env applied at v6 (dnsmasq dhcp-host
@@ -23,7 +23,7 @@
     3. packer build packer/oltp-sqlserver-node/
        (output: H:\VMS\NexusPlatform\_templates\oltp-sqlserver-node\
        oltp-sqlserver-node.vmx -- clones from ws2025-desktop.vmx + adds
-       SQL 2022 + cluster features + firstboot pre-staging; ~30 min).
+       SQL 2025 + cluster features + firstboot pre-staging; ~40 min).
 
 .PARAMETER Verb
   apply    -- terraform apply -auto-approve in terraform/envs/oltp-sqlserver

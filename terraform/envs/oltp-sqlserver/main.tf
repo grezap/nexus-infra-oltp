@@ -24,8 +24,8 @@
 #      engine$ GMSA).
 #   3. Packer template built:
 #        H:\VMS\NexusPlatform\_templates\oltp-sqlserver-node\oltp-sqlserver-node.vmx
-#      (derives from ws2025-desktop.vmx; bakes SQL 2022 Developer + WSFC +
-#      iSCSI + MPIO features + firstboot pre-staging at C:\ProgramData\nexus\sql\)
+#      (from-ISO WS2025 bake; layers SQL Server 2025 Developer + WSFC +
+#      MPIO features + msiscsi + firstboot pre-staging at C:\ProgramData\nexus\sql\)
 #
 # Apply order within this env:
 #   module.sql_fci_{1,2} + module.sql_ag_rep_{1,2}  (4 parallel clones via vmrun)

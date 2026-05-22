@@ -158,7 +158,7 @@ foreach ($r in $fwRules) {
 Write-Host "=== 11-cluster-features: enabling SQL Server HADR (AlwaysOn) ==="
 
 Stop-Service -Name MSSQLSERVER -Force -ErrorAction SilentlyContinue
-# WMI namespace: ROOT\Microsoft\SqlServer\ComputerManagement17 (SQL 2022).
+# WMI namespace: ROOT\Microsoft\SqlServer\ComputerManagement17 (SQL Server 2025).
 # Locate the ServerSettings class instance + set IsHadrEnabled = true.
 $wmiNamespace = 'ROOT\Microsoft\SqlServer\ComputerManagement17'
 try {

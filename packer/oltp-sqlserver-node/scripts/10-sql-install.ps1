@@ -1,7 +1,7 @@
 # 10-sql-install.ps1 -- SQL Server 2025 Enterprise Developer Edition silent install.
 #
 # Inputs (environment vars, set by Packer's powershell provisioner):
-#   NEXUS_SQL_VERSION   = '2022'  (informational; not actually used by
+#   NEXUS_SQL_VERSION   = '2025'  (informational; not actually used by
 #                                  setup.exe since the binaries are version-
 #                                  specific anyway)
 #   NEXUS_SQL_EDITION   = 'Developer'

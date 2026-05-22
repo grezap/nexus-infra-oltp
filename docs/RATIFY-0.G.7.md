@@ -23,7 +23,7 @@ session start 2026-05-20:
 | ws2025-desktop.vmx baked | `Test-Path H:\VMS\NexusPlatform\_templates\ws2025-desktop\ws2025-desktop.vmx` | True |
 | 6 foundation VMs running | `vmrun list` | dc-nexus + nexus-gateway + vault-1/2/3 + vault-transit |
 | vault-ad-bind.json + vault-init.json + vault-ca-bundle.crt | `Test-Path $HOME/.nexus/{vault-ad-bind.json,vault-init.json,vault-ca-bundle.crt}` | All True |
-| **SQL Server 2022 Developer ISO** | `Test-Path H:\VMS\ISO\SQLServer2022-x64-ENU-Dev.iso` | True (downloaded from MSDN per ADR-0144) |
+| **SQL Server 2025 Developer ISO** | `Test-Path H:\VMS\ISO\SqlServer2025EnterpriseDeveloperEdition.iso` | True (downloaded from MSDN per ADR-0144) |
 
 **Initial state at ratification start (2026-05-20):** vault unsealed ✅;
 KDS key present (effective 2026-05-01) ✅; ws2025-desktop baked ✅; foundation
@@ -93,10 +93,10 @@ ssh nexusadmin@192.168.70.1 "head -1 /etc/dnsmasq.d/foundation-oltp-reservations
 
 ### §1.3 SQL Server ISO -- compute SHA256 + patch Packer variables
 
-After Greg drops the ISO at `H:\VMS\ISO\SQLServer2022-x64-ENU-Dev.iso`:
+After Greg drops the ISO at `H:\VMS\ISO\SqlServer2025EnterpriseDeveloperEdition.iso`:
 
 ```pwsh
-$iso = "H:\VMS\ISO\SQLServer2022-x64-ENU-Dev.iso"
+$iso = "H:\VMS\ISO\SqlServer2025EnterpriseDeveloperEdition.iso"
 $hash = (Get-FileHash $iso -Algorithm SHA256).Hash.ToLower()
 "sha256:$hash"  # paste this into variables.pkr.hcl
 ```
@@ -139,8 +139,8 @@ Spot-check before terraform apply:
 ssh nexusadmin@<dhcp-IP>   # password: nexus-packer-build-only
 # Per-template steady-state checks:
 Get-Service MSSQLSERVER                    # -> Stopped + StartupType Manual (set by Stage 5 cleanup)
-sqlcmd -E -Q "SELECT @@VERSION" -h -1 -W   # -> 2022 Developer + 16.0.x.x
-Get-WindowsFeature Failover-Clustering,Multipath-IO,iSCSI-Initiator | Where InstallState -eq Installed
+sqlcmd -E -Q "SELECT @@VERSION" -h -1 -W   # -> 2025 Developer + 17.0.x.x (SQL 2025 = instance MSSQL17)
+Get-WindowsFeature Failover-Clustering,Multipath-IO | Where InstallState -eq Installed   # iSCSI-Initiator is built-in on WS2025 (msiscsi service)
 # Expected: all 3 listed Installed
 & 'C:\Program Files (x86)\VMware\VMware Workstation\vmrun.exe' stop <vmx-path> hard
 ```
