@@ -4,10 +4,11 @@
 > five OLTP cluster sub-phases shipped per-cluster + per-engine.
 > 0.G.1+0.G.2+0.G.3+0.G.3.5 **PROVEN cold-rebuildable (2026-05-18)**; 0.G.4
 > (Patroni + etcd + HAProxy) closed 2026-05-19; **0.G.7 (SQL Server FCI +
-> Always On AG on Windows Server 2025) LIVE-RATIFIED 2026-05-22 — smoke
-> `smoke-0.G.7.ps1` ALL GREEN (56/56)**; all 40+ ratification transients
-> root-caused + fixed in source (cold-rebuild-ready). With 0.G.7 the OLTP
-> tier is SEALED (5/5 clusters):
+> Always On AG on Windows Server 2025) PROVEN COLD-REBUILDABLE 2026-05-22 —
+> full destroy → packer build → apply-from-zero → `smoke-0.G.7.ps1` ALL GREEN
+> (56/56)**; 40+ ratification + 4 cold-rebuild transients (§3.5d) all
+> root-caused + fixed in source. With 0.G.7 the OLTP tier is SEALED + ALL
+> cold-rebuild proven (5/5 clusters):
 >
 > - **0.G.1** (6-node Redis Cluster mTLS) — smoke ALL GREEN on
 >   `envs/oltp-redis/` via `oltp-redis-node.vmx`.
@@ -735,6 +736,34 @@ All 5 SQL components are LIVE + verified after this set. Every fix is permanent 
 | 29o-r | ag-listener: `sqlcmd -E` over plain SSH = local nexusadmin (not FCI sysadmin) + no `-C`; registry key hardcoded MSSQL16; direct Restart-Service on the clustered FCI; bound a separate listener cert. | Multiple pre-ratification assumptions. | ADD LISTENER + bind via the schtasks domain-task + `sqlcmd -C`; registry key = `MSSQL17.MSSQLSERVER`; FCI restart via Stop/Start-ClusterGroup; bind the unified per-node cert (newest matching CN + listener SAN + private key). |
 | 29u | remote `sqlcmd -S sql-ag-listener -E` (Windows auth) → "Login failed for NT AUTHORITY\ANONYMOUS LOGON". | SQL can't auto-register SPNs for VIRTUAL names (FCI + Listener); the gmsa had zero SPNs → Kerberos unavailable → NTLM → anonymous over the floating IP. | ag-listener Step 1b registers `MSSQLSvc/{sqlfci,sql-ag-listener}.nexus.lab[:1433]` on `gmsa-sql-engine$` via the domain-task (setspn -S, idempotent). Verified: remote domain client `sqlcmd -S sql-ag-listener.nexus.lab -E -N` (Encrypt + strict validate) → primary=SQLFCI. Also: PKI role `sqlserver-server` allowed_domains gained `sqlfci` (security env, applied live). |
 | 30 | **Cold-rebuild gap (caught in pre-rebuild audit 2026-05-22, not a live failure):** SQL Server 2025 dropped the bundled `sqlcmd.exe` (#17), and during the first ratification `sqlcmd` + ODBC Driver 18 were installed MANUALLY on the nodes. NO bake stage or apply overlay installed them -- so a from-zero rebuild from a fresh template would have no `sqlcmd`, and the FIRST T-SQL call (fci-install) would fail "sqlcmd not recognized". Every apply overlay + the smoke gate shell out to `sqlcmd`. | The tooling install was never folded back into source after the manual ratification fix -- a silent from-zero invariant break that wouldn't surface until a real cold rebuild. | Bake the tooling into the template: `10-sql-install.ps1` now installs ODBC Driver 18 (`fwlink/?linkid=2358430`, 18.6.x) + the Command Line Utilities 15 (`fwlink/?linkid=2230791`, legacy ODBC `sqlcmd`+`bcp` -- NOT go-sqlcmd, to match the overlays' flag semantics) via `msiexec /qn` with the license-accept properties, then HARD-verifies `sqlcmd.exe` resolves on PATH (bake aborts otherwise). Overridable via `NEXUS_ODBC18_MSI_URL` / `NEXUS_SQLCMD_MSI_URL` env. Both fwlinks validated (HTTP 200; 7.26 MB + 2.13 MB). Requires a template re-bake to take effect. |
+
+### §3.5d 0.G.7 COLD-REBUILD PROOF (2026-05-22 — from-zero destroy + rebuild)
+
+**Status: PROVEN.** A full `terraform destroy` → `packer build -force` →
+prerequisite cleanup → `terraform apply` from zero → `smoke-0.G.7.ps1` **ALL
+GREEN 56/56**. This is the genuine cold-rebuild proof (vs the forward
+live-ratification): it flushed out 4 from-zero invariant breaks that the
+forward path had masked by luck or by manual ratification fixes.
+
+**The cold-rebuild runbook:**
+
+1. `pwsh -File scripts/oltp-sqlserver.ps1 destroy` (or `terraform destroy`) — removes the 4 VMs + overlay state.
+2. **Re-bake** (if the template changed): `cd packer/oltp-sqlserver-node && packer build -force .` (~43 min; from the WS2025 ISO; now bakes sqlcmd+ODBC per #30).
+3. **Prerequisite cleanup** (the footprint `destroy` leaves OUTSIDE the env): `pwsh -File scripts/cold-rebuild-prereqs.ps1`. Removes the stale WSFC CNO `sql-fci-cluster` + FCI/Listener VCOs (`sqlfci`,`sql-ag-listener`) + the 4 node computer accounts + their DNS A records from AD (dc-nexus), AND wipes the iSCSI LUN backing file on nexus-gateway (else the new FCI install collides with the old NTFS+DBs). Idempotent. Mirrors swarm-nomad's "wipe stale Vault KV tokens" prerequisite.
+4. `pwsh -File scripts/oltp-sqlserver.ps1 apply` (or `terraform apply`).
+5. `pwsh -File scripts/smoke-0.G.7.ps1` → expect 56/56.
+
+(A future enhancement could fold step 3 into `when=destroy` provisioners on the wsfc/domain-join/iscsi overlays so the rebuild is fully hands-off; today it's a documented one-command prerequisite.)
+
+**Transients the cold rebuild surfaced** (the forward ratification never hit these):
+
+| # | Symptom | Diagnosis | Recovery action |
+|---|---|---|---|
+| 31 | First from-zero apply: `setup.exe InstallFailoverCluster` failed `-2067660798` / Summary.txt "Root of path S:\SQLData\MSSQL17.MSSQLSERVER\MSSQL\DATA does not exist". | setup creates the instance-specific leaf subdirs UNDER `/INSTALLSQLDATADIR` but requires the BASE dir (`S:\SQLData`) to pre-exist. iscsi-attach's `Format-Volume` leaves `S:\` empty; the forward ratification had `S:\SQLData` created by hand. | `role-overlay-fci-install.tf`: create `S:\SQLData` (`New-Item -Force`) in the InstallFC orchestrate before `setup.exe`, guarded by a `Test-Path S:\` check. |
+| 32 | After #31, InstallFC's `Test-Path S:\` guard threw "S: not mounted on sql-fci-1". Diagnostic: the "Available Storage" cluster group (holding the disk) was Online + owned by sql-fci-1, but `S:\` was NOT mounted -- the disk's partition came back as **`E:`**. Also the group can be owned by ANY of the 4 WSFC nodes after the Phase A reboots. | `Add-ClusterDisk` (wsfc-bootstrap) strips/drifts the iscsi-attach drive letter; a clustered Physical Disk doesn't keep its letter through Add+reboot. InstallFC on sql-fci-1 needs `S:` mounted locally. Cluster RESOURCE cmdlets (`Get-ClusterResource`, `.OwnerGroup`, `Move-ClusterGroup` via the resource) **hang** in the schtasks domain-task context (#28n class) -- but `Get-ClusterGroup`/`Set-Partition` work over plain SSH. | `role-overlay-fci-install.tf`: NEW plain-SSH disk-prep step (build-host side, after Phase A, before the InstallFC domain-task): `Move-ClusterGroup 'Available Storage' -Node sql-fci-1` + `Set-Partition -NewDriveLetter S` (storage cmdlet, no cluster dependency) + create `S:\SQLData`. The orchestrate's #31 block reduced to a `Test-Path S:\` guard + `New-Item`. |
+| 33 | After #31/#32 (FCI + AddNode now succeed from zero), ag-bootstrap step 6a failed: `ALTER AVAILABILITY GROUP ADD DATABASE nexus_demo` -> Msg 1475 "...create a full backup on the primary database. Then restore this backup ... on the mirror ...". | A brand-new database has no backup, so it has no recovery/LSN baseline -- SQL refuses to add it to an AG until a full backup exists. The forward ratification masked this: `nexus_demo` already had a backup from the earlier failed AUTOMATIC-seed attempt. | `role-overlay-ag-bootstrap.tf` step 6a reorder: full `BACKUP DATABASE` FIRST -> `ALTER AVAILABILITY GROUP ADD DATABASE` (now allowed) -> `BACKUP LOG`. The `.bak`/`.trn` pair remains the manual-seed base for the replicas. |
+
+**Result:** AG `nexus-ag` -- FCI primary `sqlfci` + `sql-ag-rep-1/2` SYNCHRONIZING+HEALTHY (`nexus_demo` manually seeded); Listener `sql-ag-listener` @ .17 strict-TLS + Kerberos (SPNs registered, unified cert bound on all 4); smoke 56/56. The OLTP tier is now cold-rebuild-PROVEN 5/5.
 
 **Anticipated transient classes still pending discovery** (pre-ratification
 predictions; some may not surface, others not anticipated will):
