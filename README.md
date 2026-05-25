@@ -7,7 +7,7 @@
 [![Phase](https://img.shields.io/badge/phase-0.G.1%E2%80%930.G.3.5%20CLOSED%20%E2%80%A2%200.G.4%20SCAFFOLDED-brightgreen)](./CHANGELOG.md)
 [![Release](https://img.shields.io/badge/release-unreleased-lightgrey)](./CHANGELOG.md)
 
-OLTP data tier of the **NexusPlatform 66-VM lab** — Redis Cluster · MongoDB RS · Percona XtraDB Cluster + ProxySQL · PostgreSQL Patroni + etcd + HAProxy · SQL Server FCI + AG. 25 VMs across tiers `02-sqlserver` (4 Windows) + `05-oltp` (21 Linux).
+OLTP data tier of the **NexusPlatform lab** (88 VMs built through Phase 0.L.4) — Redis Cluster · MongoDB RS · Percona XtraDB Cluster + ProxySQL · PostgreSQL Patroni + etcd + HAProxy · SQL Server FCI + AG. 26 VMs across tiers `02-sqlserver` (4 Windows) + `05-oltp` (22 Linux).
 
 > **Canon:** This repo implements [Phase 0.G](https://github.com/grezap/nexus-platform-plan/blob/main/MASTER-PLAN.md) (line 159) of the NexusPlatform blueprint. VM inventory is `nexus-platform-plan/docs/infra/vms.yaml`. Architectural source of truth is [`nexus-platform-plan`](https://github.com/grezap/nexus-platform-plan).
 >
