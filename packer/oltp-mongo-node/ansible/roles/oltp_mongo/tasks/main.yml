@@ -56,14 +56,31 @@
     group: root
     mode: '0644'
 
-- name: Install mongodb-org-server + mongodb-mongosh + mongodb-org-tools
+- name: Install mongodb-org-server + mongodb-mongosh + mongodb-org-tools + mongodb-org-mongos
   ansible.builtin.apt:
     name:
-      - mongodb-org-server
-      - mongodb-mongosh
-      - mongodb-org-tools
+      - mongodb-org-server      # mongod (data plane)
+      - mongodb-mongosh         # mongosh REPL
+      - mongodb-org-tools       # mongodump, mongorestore, etc.
+      - mongodb-org-mongos      # mongos (query router) -- Phase 0.N sharded cluster
     state: present
     update_cache: true
+
+# Disable apt-shipped mongos.service. There is no native unit (mongos is a
+# CLI launched on demand), but if a future apt revision ships one we mask it
+# so the canonical nexus-mongos.service is the only one that can bind 27017.
+- name: Stop mongos.service (apt-installed) if present + running
+  ansible.builtin.systemd:
+    name: mongos.service
+    state: stopped
+  failed_when: false
+
+- name: Disable + mask mongos.service (apt-installed) if present
+  ansible.builtin.systemd:
+    name: mongos.service
+    enabled: false
+    masked: true
+  failed_when: false
 
 # ─── Disable + mask the apt-shipped mongod.service ────────────────────────
 # Debian's mongodb-org-server enables mongod.service by default. Our
@@ -138,6 +155,7 @@
   loop:
     - mongod --version
     - mongosh --version
+    - mongos --version
   register: oltp_mongo_verify
 
 - name: Show installed MongoDB version
@@ -145,4 +163,5 @@
     msg:
       - "mongod:  {{ oltp_mongo_verify.results[0].stdout_lines[0] }}"
       - "mongosh: {{ oltp_mongo_verify.results[1].stdout }}"
+      - "mongos:  {{ oltp_mongo_verify.results[2].stdout_lines[0] }}"
       - "Vendor major: {{ oltp_node_mongodb_version }} (from repo.mongodb.org/apt/debian bookworm)"

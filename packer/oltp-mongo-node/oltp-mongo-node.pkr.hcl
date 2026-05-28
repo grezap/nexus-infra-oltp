@@ -120,7 +120,7 @@ source "vmware-iso" "oltp-node" {
   vmx_remove_ethernet_interfaces = true
 
   vmx_data = {
-    "annotation"           = "oltp-mongo-node template (Phase 0.G.3.5+) -- built by Packer; MongoDB ${var.mongodb_version} (MongoDB vendor apt)"
+    "annotation"           = "oltp-mongo-node template (Phase 0.G.3.5+, Phase 0.N adds mongos) -- built by Packer; MongoDB ${var.mongodb_version} (MongoDB vendor apt). Includes mongod (data), mongosh (REPL), mongodb-org-tools, and mongos (sharded router)."
     "tools.upgrade.policy" = "useGlobal"
   }
 }
@@ -181,8 +181,10 @@ build {
       "echo '--- oltp-mongo-node post-install checks ---'",
       "test -x /usr/bin/mongod",
       "test -x /usr/bin/mongosh",
+      "test -x /usr/bin/mongos",
       "mongod --version | head -1",
       "mongosh --version",
+      "mongos --version | head -1",
       "systemctl cat nexus-mongo.service > /dev/null",
       "systemctl cat oltp-node-firstboot.service > /dev/null",
       "systemctl is-enabled oltp-node-firstboot",
