@@ -12,7 +12,7 @@ variable "vm_output_dir_root" {
 
 variable "vmrun_path" {
   type    = string
-  default = "C:/Program Files (x86)/VMware/VMware Workstation/vmrun.exe"
+  default = "C:/Program Files/VMware/VMware Workstation/vmrun.exe"
 }
 
 variable "vnet_primary" {

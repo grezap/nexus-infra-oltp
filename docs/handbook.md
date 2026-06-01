@@ -324,6 +324,8 @@ This is the key win over the legacy monolithic `oltp.ps1 destroy` which would te
 | 0.G.4 | Patroni + etcd + HAProxy HA pair + VRRP VIP `.60` (8 nodes) | `terraform/envs/oltp-patroni/` ✅ | `packer/oltp-{patroni,etcd,haproxy}-node/` ✅ (3 per-engine templates; haproxy template bakes keepalived) | `smoke-0.G.4.ps1` ✅ **ALL 152 CHECKS PASSED 2026-05-19** | ✅ **PROVEN end-to-end 2026-05-19** -- foundation v5 + security patroni overlays + 3 Packer templates + per-cluster TF env (7 overlays incl. haproxy-keepalived) + operator wrapper + smoke gate (152 checks, 13 sections) + 4 demo playbooks. 18 transients surfaced + all root-caused + permanent fixes baked into source (full chronology in §3.x). | 2026-05-19 |
 | 0.G.7 | SQL Server FCI + AG (4 ws2025-desktop nodes; 2 FCI + 2 AG-replica) | `terraform/envs/oltp-sqlserver/` ✅ (9 role-overlays) | `packer/oltp-sqlserver-node/` ✅ (from-ISO WS2025 + SQL Server 2025 Developer + WSFC + MPIO features + msiscsi) | `smoke-0.G.7.ps1` ✅ **ALL GREEN 56/56** | ✅ **LIVE-RATIFIED 2026-05-22** — foundation v6 dnsmasq overlay + iSCSI target on nexus-gateway + 5 security sqlserver overlays + 9-overlay per-cluster TF env + operator wrapper + smoke gate. WSFC + FCI (`sqlfci` @ .16) + AG (`nexus-ag`, 2 async replicas SYNCHRONIZING+HEALTHY) + Listener (.17, strict-TLS proven) all live. Hybrid FCI+AG per `vms.yaml` canon (sealed with Greg 2026-05-20). ADR-0026 (iSCSI shared storage) + ADR-0027 (AG endpoint cert auth). 40+ ratification transients root-caused + fixed in source (§3.5b + §3.5c). | 2026-05-22 |
 
+| 0.N | MongoDB sharded cluster (11 nodes: 3 config + 2×3 shards + 2 mongos) | `terraform/envs/oltp-mongo-sharded/` ✅ (5 overlays) | `packer/oltp-mongo-node/` ✅ (shared w/ 0.G.2 RS; +`mongodb-org-mongos`) | `smoke-0.N.ps1` ✅ **ALL GREEN 50/50 2026-05-30** | ✅ **LIVE-RATIFIED 2026-05-30** — foundation v7 dnsmasq overlay (+11 mongo pins) + 5-overlay per-cluster env (nftables → keyfile → config → rs-initiate ×3 → add-shards) + operator wrapper + smoke gate. 3 config RS + shard-1 + shard-2 (all 1P+2S+healthy) + 2 mongos + sharded collection chunked across both shards. ADR-0040. keyFile auth, mTLS deferred to 0.N.1. 9 ratification transients root-caused + fixed in source (§3.N) + 1 cold-rebuild transient (§3.Nb N10 -- `-parallelism=3` for the first apply). **COLD-REBUILD PROVEN 2026-05-30** (template rebuild → destroy → from-zero apply → smoke 50/50). OLTP tier now **6/6 cold-rebuild-proven** (redis + mongo RS + percona + patroni + sqlserver + mongo-sharded). | 2026-05-30 |
+
 (0.G.5 ClickHouse + 0.G.6 StarRocks belong to the sibling `nexus-infra-analytics` repo.)
 
 ## §3 Operator runbooks
@@ -337,23 +339,26 @@ Canonical per-cluster cycle (each cluster independent, can be ordered or paralle
 ```pwsh
 cd <repo-root>\workspace\nexus-infra-oltp
 
-# 1. Per-cluster destroy (bounded to that cluster only -- other 3 stay live)
-pwsh -File scripts\oltp-redis.ps1   destroy   # 6 redis VMs
-pwsh -File scripts\oltp-mongo.ps1   destroy   # 3 mongo VMs
-pwsh -File scripts\oltp-percona.ps1 destroy   # 5 percona VMs (3 PXC + 2 ProxySQL)
-pwsh -File scripts\oltp-patroni.ps1 destroy   # 8 patroni-tier VMs (3 PG + 3 etcd + 2 HAProxy)
+# 1. Per-cluster destroy (bounded to that cluster only -- others stay live)
+pwsh -File scripts\oltp-redis.ps1    destroy   # 6 redis VMs
+pwsh -File scripts\oltp-mongo.ps1    destroy   # 3 mongo RS VMs (0.G.2)
+pwsh -File scripts\oltp-percona.ps1  destroy   # 5 percona VMs (3 PXC + 2 ProxySQL)
+pwsh -File scripts\oltp-patroni.ps1  destroy   # 8 patroni-tier VMs (3 PG + 3 etcd + 2 HAProxy)
+pwsh -File scripts\mongo-sharded.ps1 destroy   # 11 sharded-mongo VMs (3 cfg + 2x3 shards + 2 mongos) (0.N)
 
 # 2. Per-cluster apply (foundation + security stay live; this clones + brings up cold)
-pwsh -File scripts\oltp-redis.ps1   apply
-pwsh -File scripts\oltp-mongo.ps1   apply
-pwsh -File scripts\oltp-percona.ps1 apply
-pwsh -File scripts\oltp-patroni.ps1 apply
+pwsh -File scripts\oltp-redis.ps1    apply
+pwsh -File scripts\oltp-mongo.ps1    apply
+pwsh -File scripts\oltp-percona.ps1  apply
+pwsh -File scripts\oltp-patroni.ps1  apply
+pwsh -File scripts\mongo-sharded.ps1 apply     # 0.N -- shares the oltp-mongo-node template w/ oltp-mongo
 
 # 3. Per-cluster smoke
-pwsh -File scripts\oltp-redis.ps1   smoke    # 0.G.1 exit gate
-pwsh -File scripts\oltp-mongo.ps1   smoke    # 0.G.2 exit gate
-pwsh -File scripts\oltp-percona.ps1 smoke    # 0.G.3 exit gate
-pwsh -File scripts\oltp-patroni.ps1 smoke    # 0.G.4 exit gate
+pwsh -File scripts\oltp-redis.ps1    smoke    # 0.G.1 exit gate
+pwsh -File scripts\oltp-mongo.ps1    smoke    # 0.G.2 exit gate
+pwsh -File scripts\oltp-percona.ps1  smoke    # 0.G.3 exit gate
+pwsh -File scripts\oltp-patroni.ps1  smoke    # 0.G.4 exit gate
+pwsh -File scripts\smoke-0.N.ps1              # 0.N exit gate (50/50)
 
 # Shortcut: pwsh -File scripts\oltp-<cluster>.ps1 cycle does destroy -> apply -> smoke
 ```
@@ -776,4 +781,62 @@ predictions; some may not surface, others not anticipated will):
 | Listener cert binding to SuperSocketNetLib | Setting `Certificate` registry value + `ForceEncryption=1` + restarting MSSQLSERVER must complete BEFORE clients try TLS. Race possible. |
 | GMSA pwd retrieval timing | `Install-ADServiceAccount` may return success but `Test-ADServiceAccount` still fails if KDS replication hasn't propagated. Mitigated by single-DC lab. |
 | SQL ISO upload OOM on Packer's SCP | 3.5 GB over SSH may need `winrm set winrm/config/winrs '@{MaxMemoryPerShellMB="4096"}'` or alternative ISO-mount strategy. |
+
+### §3.N 0.N MongoDB sharded cluster — walkthrough + ratification (2026-05-30)
+
+**Cluster:** 11 VMs — 3 config-server RS (`config`, port 27019) `mongo-cfg-1/2/3` @ .74/.75/.76 · 2 shard RSes × 3 (`shard-1` @ .77/.78/.79, `shard-2` @ .80/.56/.57, port 27018) · 2 mongos routers (port 27017) `mongo-mongos-1/2` @ .58/.59. keyFile internal auth, no mTLS in v1 (deferred to 0.N.1). Per ADR-0040. Per-engine template `oltp-mongo-node` (shared with the 0.G.2 RS, +`mongodb-org-mongos`); per-cluster env `terraform/envs/oltp-mongo-sharded/`. MAC pool `:C0–:CA` (primary) / `:01:8A–94` (secondary).
+
+**§1n From-zero replay path** (prerequisites: foundation + security live; Vault HA unsealed; `oltp-mongo-node` template built):
+
+```pwsh
+# 0. Prereqs that must already exist + how to verify:
+#    - 6-VM foundation base running (gateway+dc-nexus+vault-1/2/3+transit); `vmrun list`
+#    - Vault HA unsealed: VAULT_ADDR=https://192.168.70.121:8200 vault status -> sealed=false
+#      (after a host reboot run scripts/recover-vault-ha.ps1 first — see §3.2)
+#    - Build host VMnet11 adapter = 192.168.70.254 (NOT .1); see §3.2 / memory vmnet-host-adapter-ip-reset
+#    - KV nexus/oltp/mongo/keyfile seeded (by the 0.G.2 security env); ~/.nexus/vault-init.json present
+# 1. Build the template (only if its source changed):
+Push-Location packer\oltp-mongo-node; packer init .; packer build -force -var "iso_url=H:/VMS/ISO/debian-13.5.0-amd64-netinst.iso" .; Pop-Location   # ~8 min
+# 2. Foundation apply writes the 11 dhcp-host pins (.74-.80/.56-.59) — v7 reservations:
+pwsh -File ..\nexus-infra-vmware\scripts\foundation.ps1 apply
+# 3. Clone 11 VMs + run the 5-overlay pipeline (nftables -> keyfile -> config -> rs-initiate x3 -> add-shards):
+pwsh -File scripts\mongo-sharded.ps1 apply           # ~25-35 min
+# 4. Exit gate:
+pwsh -File scripts\smoke-0.N.ps1                      # expect 50/50 GREEN
+```
+
+Selective ops: every overlay + VM is gated by an `enable_*` var (all default `true`); e.g. rebuild just the config-server RS with `-Vars 'enable_mongo_shard_1_1=false,...'` is supported but the cluster needs all members for a healthy smoke.
+
+**Ratification transients (2026-05-30 — 9 surfaced, all fixed in source):**
+
+| # | Symptom | Diagnosis | Fix (in source) |
+|---|---|---|---|
+| N1 | After a host reboot, build host can't reach ANY lab IP (ping/SSH to gateway+vault all time out; ARP table empty) though `vmrun list` shows all VMs up. | The Windows host's VMnet11/VMnet10 adapters lost their canonical static IPs (`.254`) and fell back to APIPA `169.254.x` + VMware-default `.1`. The `.1` collides with the gateway VM → segment dark. (A VMware Workstation upgrade triggered the reboot + reset its network config.) | Restore host adapter IPs in the **Virtual Network Editor** (admin): VMnet11=`192.168.70.254`, VMnet10=`192.168.10.254`, DHCP off. OS-level `New-NetIPAddress` does NOT persist (VMware re-forces `.1`). memory: `vmnet-host-adapter-ip-reset`. |
+| N2 | After N1 fixed, `terraform plan` errors `context deadline exceeded` on Vault data sources; vault-1 service `failed`, not listening. | Same reboot tripped the vault-transit boot race (transit sealed → HA can't auto-unseal → systemd gives up). | `pwsh -File ..\nexus-infra-vmware\scripts\recover-vault-ha.ps1` (idempotent). §3.2. |
+| N3 | A plain `foundation apply` for the 11 mongo dhcp pins was a silent no-op (pins never written → clones would take random leases). | `null_resource.gateway_oltp_reservations` trigger held `oltp_reservations_v="6"` while the file body had been extended to 37 entries (v7) — the trigger didn't change, so terraform never re-ran the provisioner. The 11 new mongo MACs weren't trigger keys either. | Bump `oltp_reservations_v="7"` **and** add all 11 `mac_oltp_mongo_*` to the trigger map (a body edit now forces re-create). Forward rule: audit reservation triggers when extending the body. memory: `terraform-partial-apply-destroys-resources`. |
+| N4 | `terraform apply` clone step: `The term 'C:/Program Files (x86)/VMware/VMware Workstation/vmrun.exe' is not recognized`. | The VMware upgrade relocated `vmrun.exe` from `(x86)` Program Files to the non-`(x86)` path. Every env hardcoded the old `(x86)` `vmrun_path` default. Stale clone state from the 05-28 apply referenced deleted VMs. | `vmrun_path` corrected repo-wide (8 files: 6 envs + `modules/vm/variables.tf` + README). Recovery for the partial apply: `terraform state rm` the stale `clone_vm` + delete empty VM dirs, then re-apply. memory: `vmrun-path-moved-nonx86`. **Other infra repos still stale.** |
+| N5 | One of 11 VMs (`mongo-mongos-1`) failed `power_on`: "The operation was canceled". | `vmrun start` transient under 11 concurrent power-ons. | Re-run apply — the tainted `power_on` retries cleanly (clone+nic already done). memory: `vmrun-unknown-error-transient`. |
+| N6 | `nftables` overlay hung 20 min on every node: "SSH + firstboot marker never ready". VMs reachable + correctly IP'd, but `oltp-node-firstboot` service `failed`, no marker. | `oltp-node-firstboot.sh` (baked in the template) has a hardcoded IP→hostname map that only knew the 0.G IPs; it rejected the new 0.N IPs with `ERROR: unknown VMnet11 IP` → exit 1 → no marker. 0.N scaffolding extended the template package set but not the firstboot IP-map. | `_shared/ansible/roles/oltp_firstboot/files/oltp-node-firstboot.sh`: add the 11 0.N IPs (CLUSTER=`mongo-sharded` → `/etc/nexus-mongo`, group `mongodb`). Patched in-place on the running VMs for the live run; **template rebuilt** so cold-rebuild gets it from zero. |
+| N7 | `config` overlay timed out (20 min) waiting for `nexus-mongos.service` "active + port 27017 listening" on both mongos. mongos was `active`, NRestarts=0, but not listening. | Ordering deadlock: mongos cannot bind 27017 until it loads sharding metadata from the config-server RS, but `rs-initiate` (which initializes that RS) runs in a LATER overlay. mongos stays up retrying internally (no crash). | `role-overlay-mongo-config.tf`: for `mongos` role require only `active` (not listening); operational readiness is gated by `add-shards`' ping loop, which runs after `rs-initiate` brings the config RS online — mongos then binds on its own. |
+| N8 | All 3 `rs-initiate` failed instantly: PowerShell `ParserError: Variable reference is not valid. ':' was not followed by a valid variable name character` (also `add-shards`). | `"$bootIp:$port"` / `"$mongosIp:$mongosPort"` — PS parses `$bootIp:` as a scope qualifier. First fix `${bootIp}` then hit terraform `Error: Invalid reference` because `${}` is TF interpolation inside the heredoc. | `$${bootIp}:$port` / `$${mongosIp}:$mongosPort` — `${}` delimits the PS var AND the leading `$$` escapes it through the TF heredoc. memory: `powershell-url-scope-qualifier` + `terraform-heredoc-powershell`. |
+| N9 | `add-shards` hung 20 min: mongos ping never returned. Log: `MongoServerError: Can't use 'local' database through mongos`; mongos auth `Failed to authenticate user:"__system" db:"local"`. | `__system` (keyFile) authenticates against the `local` DB — allowed on mongod (so rs-initiate worked) but **mongos forbids `local`-DB access**. The scaffolding used `__system`-through-mongos everywhere. Sharded-cluster client users live in `admin` on the config servers. | `role-overlay-mongo-add-shards.tf`: createUser `nexus-sharded-admin` (root, pwd=keyFile content) in `admin` on the config-server PRIMARY via `__system`+`local`, then auth all mongos ops as that user @ `admin`. `smoke-0.N.ps1` selects auth by port (mongos→admin user, mongod→`__system`). memory: `mongodb-8-keyfile-localhost-exception`. |
+
+**Result:** `mongo-sharded.ps1 apply` GREEN after 8 apply iterations; `smoke-0.N.ps1` **50/50 GREEN** — 11 reachable, all engines active+listening, 3 RSes 1 PRIMARY + 2 SECONDARY + healthy, 2 shards registered, sharded collection `nexus_n_smoke.samples` (200 docs) chunked across both shards, mongos routing returns correct docs on both routers.
+
+### §3.Nb 0.N COLD-REBUILD PROOF (2026-05-30 — from-zero destroy + rebuild)
+
+**Status: PROVEN.** Template rebuilt (bakes the N6 firstboot fix) → clean `terraform destroy` (33 resources) → from-zero `terraform apply` (70 added) → `smoke-0.N.ps1` **ALL GREEN 50/50**. All 11 VMs cloned fresh from the rebuilt `oltp-mongo-node` template, firstboot succeeded from zero (proving the N6 fix in the image, not just the in-place patch), and the full 5-overlay pipeline (incl. the N7/N8/N9 overlay fixes) ran clean. The cold-rebuild runbook:
+
+1. `Push-Location packer\oltp-mongo-node; packer build -force -var "iso_url=H:/VMS/ISO/debian-13.5.0-amd64-netinst.iso" .; Pop-Location` (~7 min; bakes the fixed firstboot IP-map — N6).
+2. `pwsh -File scripts\mongo-sharded.ps1 destroy` (11 VMs).
+3. **`terraform -chdir=terraform/envs/oltp-mongo-sharded apply -auto-approve -parallelism=3`** (fresh clone from the rebuilt template → firstboot succeeds → 5-overlay pipeline incl. the N7/N8/N9 fixes). **Use `-parallelism=3`, not the wrapper's default — see N10.**
+4. `pwsh -File scripts\smoke-0.N.ps1` → 50/50.
+
+(Unlike 0.G.7, 0.N leaves no out-of-env footprint — no AD computer accounts, no iSCSI LUN — so no prerequisite-cleanup step is needed between destroy and apply.)
+
+**Cold-rebuild transient:**
+
+| # | Symptom | Diagnosis | Fix |
+|---|---|---|---|
+| N10 | Both `mongo-sharded.ps1 apply` (default `-parallelism=10`) and the `cycle` apply failed `power_on`: multiple nodes "Error: Unknown error" / "Error: The operation was canceled" — and once one errors, terraform cancels the in-flight rest, leaving 0 VMs reliably up. Hit on BOTH the live-ratification first apply (N5) and the cold-rebuild. | 11 simultaneous `vmrun clone`+`start` operations overwhelm VMware Workstation's vmrun on this host — not just sporadic (N5), it reproduces with 11 concurrent power-ons. memory `vmrun-unknown-error-transient`. | Run the **first** apply of the 11-VM cluster with `-parallelism=3` so VMs clone+power-on in small batches. The from-zero cold-rebuild then completes in one shot (no retry). The default parallelism is fine for the overlay-only re-applies (VMs already up). |
 

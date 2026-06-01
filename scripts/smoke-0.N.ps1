@@ -73,11 +73,19 @@ if (-not $keyfile -or $keyfile.Length -lt 100) {
     Write-Host "[FATAL] keyfile not readable from $CfgIp1 -- cluster not yet bootstrapped?" -ForegroundColor Red
     exit 1
 }
+# __system (keyFile) auth works against mongod's `local` DB (used for the
+# direct per-RS health probes on cfg/shard nodes). It is REJECTED through mongos
+# ("Can't use 'local' database through mongos"), so mongos probes auth as the
+# cluster admin user (created by the add-shards overlay on the config servers,
+# password = keyFile content) against the `admin` DB. Invoke-Mongosh selects the
+# right auth by port: mongos port -> admin user; mongod ports -> __system.
 $auth = "--username __system --password '$keyfile' --authenticationDatabase local --authenticationMechanism SCRAM-SHA-256"
+$mongosAuth = "--username nexus-sharded-admin --password '$keyfile' --authenticationDatabase admin"
 
 function Invoke-Mongosh {
     param([Parameter(Mandatory)][string]$Ip, [Parameter(Mandatory)][int]$Port, [Parameter(Mandatory)][string]$Eval)
-    ssh @sshOpts "$user@$Ip" "sudo mongosh --quiet $auth --host 127.0.0.1:$Port --eval `"$Eval`" 2>/dev/null"
+    $a = if ($Port -eq $MongosPort) { $mongosAuth } else { $auth }
+    ssh @sshOpts "$user@$Ip" "sudo mongosh --quiet $a --host 127.0.0.1:$Port --eval `"$Eval`" 2>/dev/null"
 }
 
 Write-Host ''

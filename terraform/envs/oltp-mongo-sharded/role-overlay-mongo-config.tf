@@ -218,27 +218,57 @@ echo CONFIG_OK
         throw "[config $hostName] config render / service start failed"
       }
 
-      # Wait for service active + port listening.
+      # Wait for the service to come up. mongod (cfg/shard) binds its port
+      # immediately, so we require active + listening. mongos is DIFFERENT: it
+      # cannot bind its client port (27017) until it has loaded the sharding
+      # metadata from the config-server RS -- and that RS is only initialized
+      # by the LATER role-overlay-mongo-rs-initiate.tf. So a mongos node here
+      # is `active` (Type=simple process running, internally retrying the
+      # config-server connection, NRestarts=0) but NOT yet listening. Requiring
+      # `listening` for mongos would deadlock: config waits for mongos:27017,
+      # mongos waits for the config RS, rs-initiate waits for config to finish.
+      # Resolution: for mongos we only confirm the unit reached `active` (no
+      # crash); operational readiness (accepting commands on 27017) is gated by
+      # the add-shards overlay's ping loop, which runs AFTER rs-initiate brings
+      # the config RS online -- at which point mongos finishes startup + binds
+      # 27017 on its own (no restart needed). Diagnosed live at 0.N ratification
+      # 2026-05-30 (handbook §3.N transient N6).
       $svc = if ($role -eq 'mongos') { 'nexus-mongos.service' } else { 'nexus-mongo.service' }
-      Write-Host "[config $hostName] waiting for $svc active + port $port listening..."
       $deadline = (Get-Date).AddMinutes($timeout)
       $ok = $false
-      while ((Get-Date) -lt $deadline) {
-        $active = (ssh @sshOpts "$sshUser@$ip" "systemctl is-active $svc" 2>&1 | Out-String).Trim()
-        if ($active -eq 'active') {
-          # Port check via /proc/net/tcp parsing -- simpler than installing ss/netstat.
-          $portHex = '{0:X4}' -f $port
-          $listening = (ssh @sshOpts "$sshUser@$ip" "grep -E ':$portHex 00000000:0000 0A' /proc/net/tcp /proc/net/tcp6 2>/dev/null | wc -l" 2>&1 | Out-String).Trim()
-          if ($listening -match '^[1-9]') { $ok = $true; break }
+      if ($role -eq 'mongos') {
+        Write-Host "[config $hostName] waiting for $svc active (mongos binds 27017 later, after the config-server RS is initiated)..."
+        while ((Get-Date) -lt $deadline) {
+          $active = (ssh @sshOpts "$sshUser@$ip" "systemctl is-active $svc" 2>&1 | Out-String).Trim()
+          if ($active -eq 'active') { $ok = $true; break }
+          if ($active -eq 'failed') { break }
+          Start-Sleep -Seconds 5
         }
-        Start-Sleep -Seconds 5
+        if (-not $ok) {
+          $journal = (ssh @sshOpts "$sshUser@$ip" "sudo journalctl -u $svc --no-pager -n 30" 2>&1 | Out-String)
+          Write-Host $journal
+          throw "[config $hostName] $svc did not reach active within $timeout min"
+        }
+        Write-Host "[config $hostName] $svc active (port 27017 will bind after rs-initiate; readiness gated by add-shards)"
+      } else {
+        Write-Host "[config $hostName] waiting for $svc active + port $port listening..."
+        while ((Get-Date) -lt $deadline) {
+          $active = (ssh @sshOpts "$sshUser@$ip" "systemctl is-active $svc" 2>&1 | Out-String).Trim()
+          if ($active -eq 'active') {
+            # Port check via /proc/net/tcp parsing -- simpler than installing ss/netstat.
+            $portHex = '{0:X4}' -f $port
+            $listening = (ssh @sshOpts "$sshUser@$ip" "grep -E ':$portHex 00000000:0000 0A' /proc/net/tcp /proc/net/tcp6 2>/dev/null | wc -l" 2>&1 | Out-String).Trim()
+            if ($listening -match '^[1-9]') { $ok = $true; break }
+          }
+          Start-Sleep -Seconds 5
+        }
+        if (-not $ok) {
+          $journal = (ssh @sshOpts "$sshUser@$ip" "sudo journalctl -u $svc --no-pager -n 30" 2>&1 | Out-String)
+          Write-Host $journal
+          throw "[config $hostName] $svc did not become active+listening within $timeout min"
+        }
+        Write-Host "[config $hostName] $svc active + port $port listening"
       }
-      if (-not $ok) {
-        $journal = (ssh @sshOpts "$sshUser@$ip" "sudo journalctl -u $svc --no-pager -n 30" 2>&1 | Out-String)
-        Write-Host $journal
-        throw "[config $hostName] $svc did not become active+listening within $timeout min"
-      }
-      Write-Host "[config $hostName] $svc active + port $port listening"
     PWSH
   }
 

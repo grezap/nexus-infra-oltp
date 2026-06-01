@@ -151,7 +151,7 @@ variable "vm_output_dir_root" {
 variable "vmrun_path" {
   description = "Absolute path to vmrun.exe on the build host."
   type        = string
-  default     = "C:/Program Files (x86)/VMware/VMware Workstation/vmrun.exe"
+  default     = "C:/Program Files/VMware/VMware Workstation/vmrun.exe"
 }
 
 variable "vnet_primary" {

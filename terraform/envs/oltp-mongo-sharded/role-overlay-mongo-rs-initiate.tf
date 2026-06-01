@@ -93,7 +93,7 @@ resource "null_resource" "mongo_rs_initiate" {
       $sshOpts  = @('-o','ConnectTimeout=10','-o','BatchMode=yes','-o','StrictHostKeyChecking=no')
 
       Write-Host ""
-      Write-Host "[rs-initiate $rsName] bootstrap=$bootIp:$port"
+      Write-Host "[rs-initiate $rsName] bootstrap=$${bootIp}:$port"
 
       # Pre-read keyFile for __system cluster auth.
       $keyfileContent = (ssh @sshOpts "$sshUser@$bootIp" 'sudo cat /etc/nexus-mongo/keyfile 2>/dev/null' | Out-String).Trim()

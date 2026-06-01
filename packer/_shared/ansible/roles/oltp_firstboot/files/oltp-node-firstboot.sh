@@ -168,9 +168,28 @@ case "$VMNET11_IP" in
   192.168.70.67) HOSTNAME=haproxy-pg-1; VMNET10_IP=192.168.10.67; ROLE=haproxy; CLUSTER=haproxy ;;
   192.168.70.68) HOSTNAME=haproxy-pg-2; VMNET10_IP=192.168.10.68; ROLE=haproxy; CLUSTER=haproxy ;;
 
+  # ─── 0.N -- MongoDB sharded cluster (11 nodes: 3 cfg + 2x3 shards + 2 mongos) ─
+  # All 11 share CLUSTER=mongo-sharded -> identity dir /etc/nexus-mongo, group
+  # mongodb (same engine as the 0.G.2 RS; the per-engine oltp-mongo-node
+  # template carries both mongod + mongos). ROLE distinguishes configsvr /
+  # shardsvr / mongos for log/debug clarity; the Terraform overlays drive the
+  # actual per-role config + service. Decade-spill .80->.56/.57 + .58/.59 per
+  # ADR-0040 (the natural .74-.84 decade was already partly redis-owned).
+  192.168.70.74) HOSTNAME=mongo-cfg-1;     VMNET10_IP=192.168.10.74; ROLE=configsvr; CLUSTER=mongo-sharded ;;
+  192.168.70.75) HOSTNAME=mongo-cfg-2;     VMNET10_IP=192.168.10.75; ROLE=configsvr; CLUSTER=mongo-sharded ;;
+  192.168.70.76) HOSTNAME=mongo-cfg-3;     VMNET10_IP=192.168.10.76; ROLE=configsvr; CLUSTER=mongo-sharded ;;
+  192.168.70.77) HOSTNAME=mongo-shard-1-1; VMNET10_IP=192.168.10.77; ROLE=shardsvr;  CLUSTER=mongo-sharded ;;
+  192.168.70.78) HOSTNAME=mongo-shard-1-2; VMNET10_IP=192.168.10.78; ROLE=shardsvr;  CLUSTER=mongo-sharded ;;
+  192.168.70.79) HOSTNAME=mongo-shard-1-3; VMNET10_IP=192.168.10.79; ROLE=shardsvr;  CLUSTER=mongo-sharded ;;
+  192.168.70.80) HOSTNAME=mongo-shard-2-1; VMNET10_IP=192.168.10.80; ROLE=shardsvr;  CLUSTER=mongo-sharded ;;
+  192.168.70.56) HOSTNAME=mongo-shard-2-2; VMNET10_IP=192.168.10.56; ROLE=shardsvr;  CLUSTER=mongo-sharded ;;
+  192.168.70.57) HOSTNAME=mongo-shard-2-3; VMNET10_IP=192.168.10.57; ROLE=shardsvr;  CLUSTER=mongo-sharded ;;
+  192.168.70.58) HOSTNAME=mongo-mongos-1;  VMNET10_IP=192.168.10.58; ROLE=mongos;    CLUSTER=mongo-sharded ;;
+  192.168.70.59) HOSTNAME=mongo-mongos-2;  VMNET10_IP=192.168.10.59; ROLE=mongos;    CLUSTER=mongo-sharded ;;
+
   *)
-    echo "$LOG_PREFIX ERROR: unknown VMnet11 IP '$VMNET11_IP' -- not a 0.G OLTP tier IP" >&2
-    echo "$LOG_PREFIX recognised IPs: redis-1..6 (.81/.82/.83/.84/.87/.89); mongo-1..3 (.71/.72/.73); pxc-node-1..3 (.51/.52/.53); proxysql-1..2 (.54/.55); pg-{primary,replica-1,replica-2} (.61/.62/.63); etcd-1..3 (.64/.65/.66); haproxy-pg-{1,2} (.67/.68); other 0.G.* clusters land later sub-phases." >&2
+    echo "$LOG_PREFIX ERROR: unknown VMnet11 IP '$VMNET11_IP' -- not a 0.G/0.N OLTP tier IP" >&2
+    echo "$LOG_PREFIX recognised IPs: redis-1..6 (.81/.82/.83/.84/.87/.89); mongo-1..3 (.71/.72/.73); pxc-node-1..3 (.51/.52/.53); proxysql-1..2 (.54/.55); pg-{primary,replica-1,replica-2} (.61/.62/.63); etcd-1..3 (.64/.65/.66); haproxy-pg-{1,2} (.67/.68); mongo-sharded cfg .74/.75/.76 shard-1 .77/.78/.79 shard-2 .80/.56/.57 mongos .58/.59; other 0.G.* clusters land later sub-phases." >&2
     exit 1
     ;;
 esac
@@ -180,8 +199,9 @@ echo "$LOG_PREFIX mapped: hostname=$HOSTNAME role=$ROLE cluster=$CLUSTER VMnet10
 # for the cluster owns the dir + the service runs as the cluster-named
 # user; firstboot just writes the env file into the dir).
 case "$CLUSTER" in
-  redis)    IDENTITY_DIR=/etc/nexus-redis;    IDENTITY_GROUP=redis ;;
-  mongo)    IDENTITY_DIR=/etc/nexus-mongo;    IDENTITY_GROUP=mongodb ;;
+  redis)         IDENTITY_DIR=/etc/nexus-redis;    IDENTITY_GROUP=redis ;;
+  mongo)         IDENTITY_DIR=/etc/nexus-mongo;    IDENTITY_GROUP=mongodb ;;
+  mongo-sharded) IDENTITY_DIR=/etc/nexus-mongo;    IDENTITY_GROUP=mongodb ;;
   percona)  IDENTITY_DIR=/etc/nexus-percona;  IDENTITY_GROUP=mysql ;;
   proxysql) IDENTITY_DIR=/etc/nexus-proxysql; IDENTITY_GROUP=proxysql ;;
   patroni)  IDENTITY_DIR=/etc/nexus-patroni;  IDENTITY_GROUP=postgres ;;

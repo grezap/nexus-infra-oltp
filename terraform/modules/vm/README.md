@@ -26,7 +26,7 @@ The `terraform/gateway/` module is hand-rolled for nexus-gateway's 3-NIC topolog
 | `mac_secondary`     | no       | `null`                                                   | Optional secondary NIC MAC. Same OUI rules as primary. Convention: fifth byte `0x01` for secondary, mirroring primary's sixth byte. Regex-validated when set. |
 | `cpus`              | no       | `2`                                                      | Reserved — not yet applied at runtime (Packer template value inherited). |
 | `memory_mb`         | no       | `1024`                                                   | Reserved — not yet applied. |
-| `vmrun_path`        | no       | `C:/Program Files (x86)/VMware/VMware Workstation/vmrun.exe` | Override if Workstation is installed elsewhere. |
+| `vmrun_path`        | no       | `C:/Program Files/VMware/VMware Workstation/vmrun.exe` | Override if Workstation is installed elsewhere. |
 
 ## Outputs
 

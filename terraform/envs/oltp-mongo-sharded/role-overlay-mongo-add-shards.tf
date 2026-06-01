@@ -32,6 +32,29 @@ locals {
     ? local.mongos_nodes["mongo-mongos-1"].port
     : 27017
   )
+
+  # Config-server RS connection -- used to create the cluster admin user.
+  # __system (keyFile) auth works against mongod's `local` DB but NOT through
+  # mongos ("Can't use 'local' database through mongos"). Sharded-cluster
+  # client users live in the `admin` DB ON THE CONFIG SERVERS; mongos validates
+  # client auth against them. So we createUser on the config-server PRIMARY (via
+  # __system+local, which IS allowed on mongod) and then auth mongos operations
+  # as that user against `admin`. Diagnosed live at 0.N ratification 2026-05-30
+  # (handbook §3.N transient N9).
+  config_bootstrap_ip = (
+    contains(keys(local.config_nodes), "mongo-cfg-1")
+    ? local.config_nodes["mongo-cfg-1"].vmnet11
+    : (length(keys(local.config_nodes)) > 0 ? local.config_nodes[keys(local.config_nodes)[0]].vmnet11 : "")
+  )
+  config_rs_uri = format(
+    "mongodb://%s/admin?replicaSet=config",
+    join(",", [for h, s in local.config_nodes : "${s.vmnet11}:${s.port}"])
+  )
+  # Cluster admin user (root role). Password = the shared keyFile content
+  # (already distributed to every node at /etc/nexus-mongo/keyfile -- avoids
+  # introducing a new Vault secret for the lab; the 0.N.1 hardening that adds
+  # mTLS would also move this to a dedicated Vault-seeded credential + x509).
+  cluster_admin_user = "nexus-sharded-admin"
 }
 
 resource "null_resource" "mongo_add_shards" {
@@ -62,18 +85,44 @@ resource "null_resource" "mongo_add_shards" {
       $sshOpts    = @('-o','ConnectTimeout=10','-o','BatchMode=yes','-o','StrictHostKeyChecking=no')
 
       Write-Host ""
-      Write-Host "[add-shards] using mongos at $mongosIp:$mongosPort to register shards"
+      Write-Host "[add-shards] using mongos at $${mongosIp}:$mongosPort to register shards"
 
-      # Pre-read keyFile for __system auth (same shared keyFile across the
-      # cluster -- mongos accepts it).
+      # Pre-read keyFile (identical on every node). Used as the __system
+      # password to createUser on the config server, and as the cluster-admin
+      # user's password.
       $keyfileContent = (ssh @sshOpts "$sshUser@$mongosIp" 'sudo cat /etc/nexus-mongo/keyfile 2>/dev/null' | Out-String).Trim()
       if (-not $keyfileContent -or $keyfileContent.Length -lt 100) {
         throw "[add-shards] keyfile missing or too short on $mongosIp"
       }
-      $sysAuthArgs = "--username __system --password '$keyfileContent' --authenticationDatabase local --authenticationMechanism SCRAM-SHA-256"
+
+      # ─── Create the cluster admin user on the config-server PRIMARY ────────
+      # __system+local auth is allowed on mongod but REJECTED through mongos
+      # ("Can't use 'local' database through mongos"). Sharded-cluster client
+      # users live in the admin DB on the config servers; create the user there
+      # via __system, then auth all mongos operations as that user against
+      # admin. createUser is a write -> the config RS URI routes to PRIMARY.
+      # Idempotent: catch "already exists".
+      $cfgIp     = '${local.config_bootstrap_ip}'
+      $cfgRsUri  = '${local.config_rs_uri}'
+      $adminUser = '${local.cluster_admin_user}'
+      $sysAuth   = "--username __system --password '$keyfileContent' --authenticationDatabase local --authenticationMechanism SCRAM-SHA-256"
+      Write-Host "[add-shards] ensuring cluster admin user '$adminUser' on the config-server RS (auth __system, routes to PRIMARY)..."
+      $createEval = "try{db.getSiblingDB('admin').createUser({user:'$adminUser',pwd:'$keyfileContent',roles:[{role:'root',db:'admin'}]});print('USER_CREATED')}catch(e){if(e.codeName==='Location51003'||e.message.indexOf('already exists')>=0){print('USER_EXISTS')}else{print('USER_ERROR:'+e.message)}}"
+      $createOut = (ssh @sshOpts "$sshUser@$cfgIp" "sudo mongosh --quiet $sysAuth '$cfgRsUri' --eval `"$createEval`" 2>&1" | Out-String).Trim()
+      if ($createOut -match 'USER_CREATED') {
+        Write-Host "[add-shards] cluster admin user '$adminUser' created"
+      } elseif ($createOut -match 'USER_EXISTS') {
+        Write-Host "[add-shards] cluster admin user '$adminUser' already exists (idempotent)"
+      } else {
+        Write-Host $createOut
+        throw "[add-shards] failed to create cluster admin user '$adminUser': $createOut"
+      }
+
+      # All mongos operations auth as the cluster admin user against admin.
+      $sysAuthArgs = "--username $adminUser --password '$keyfileContent' --authenticationDatabase admin"
 
       # Wait for mongos to be reachable (sh.status() runs via mongos).
-      Write-Host "[add-shards] waiting for mongos to accept commands..."
+      Write-Host "[add-shards] waiting for mongos to accept commands (auth $adminUser)..."
       $deadline = (Get-Date).AddMinutes($timeout)
       $mongosUp = $false
       while ((Get-Date) -lt $deadline) {
