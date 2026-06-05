@@ -6,6 +6,20 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — nexus-cli v0.6.1 MongoAdapter — `nexus-cluster-admin` operator user (oltp-mongo env, 2026-06-05)
+
+- **`terraform/envs/oltp-mongo/role-overlay-mongo-operator-user.tf`** — idempotent createUser of the
+  dedicated operator user **`nexus-cluster-admin`** (roles clusterMonitor + clusterManager + backup +
+  restore + userAdminAnyDatabase on `admin`) that the nexus-cli MongoAdapter authenticates as. The
+  password is read **on-node** via the mongo node's own Vault Agent token (`vault kv get
+  nexus/oltp/mongo/operator-password`) and **never written to disk**; createUser uses the `__system`
+  keyFile bootstrap identity routed to the PRIMARY via the RS URI; idempotent re-apply converges the
+  role set via `grantRolesToUser`. New toggle `enable_mongo_operator_user` (default true). Runs after
+  `mongo_rs_initiate` in the apply graph; **proven in a from-zero cold-rebuild** (21 resources;
+  `CREATE_OK → PRIMARIES=1 MEMBERS=3 verified`). Pre-req: nexus-infra-vmware **security** env applied
+  first (operator-password seed + agent-policy v3 read grant). See `nexus-cli` ADR-0011 +
+  `docs/verification/0.G.2-mongo.md`.
+
 ### Added — Phase 0.N — MongoDB sharded cluster SEALED — live-ratified + cold-rebuild-proven (2026-05-30)
 
 5th OLTP cluster live: an 11-VM MongoDB **sharded** cluster (distinct from the 0.G.2 replica-set showcase) — 3 config-server RS (`mongo-cfg-1/2/3` @ .74/.75/.76, port 27019) + 2 shard RSes × 3 (`shard-1` @ .77/.78/.79, `shard-2` @ .80/.56/.57, port 27018) + 2 stateless `mongos` routers (@ .58/.59, port 27017). Per ADR-0040. Per-cluster env `terraform/envs/oltp-mongo-sharded/` (5 overlays: nftables-backplane → keyfile → config → rs-initiate ×3 → add-shards); per-engine template `oltp-mongo-node` (shared with the 0.G.2 RS, extended with `mongodb-org-mongos`); operator wrapper `scripts/mongo-sharded.ps1`; smoke gate `scripts/smoke-0.N.ps1` (**50/50 GREEN**). keyFile internal auth; mTLS deferred to 0.N.1. Foundation dnsmasq overlay bumped to v7 (+11 mongo pins). **9 ratification transients root-caused + fixed in source** (handbook §3.N): host VMnet-adapter reset (N1) + vault boot-race (N2) + reservations trigger stall v6→v7 (N3) + `vmrun.exe` relocation to non-(x86) Program Files (N4, fixed repo-wide) + vmrun power_on transient (N5) + firstboot IP-map gap (N6) + mongos config-ordering deadlock (N7) + PowerShell scope-qualifier/heredoc-escape ParserError (N8) + `__system`-can't-use-local-through-mongos → `nexus-sharded-admin` user (N9). **Cold-rebuild PROVEN** (template rebuild bakes N6 → destroy → from-zero apply → `smoke-0.N.ps1` 50/50; 1 cold-rebuild transient N10: 11 concurrent vmrun power-ons storm → first apply uses `-parallelism=3`). OLTP tier now **6/6 cold-rebuild-proven**; fleet 108 → 119 VMs. Cross-repo sweep: `nexus-infra-vmware` (foundation v7 + `vmrun_path` correction), `nexus-platform-plan` (ADR-0040 + DEMO-20 finalized + vms.yaml), `nexus-cli` (System B demo `demo-0.N-mongo-sharded-cluster-status.json`), portfolio-index + grezap profile.

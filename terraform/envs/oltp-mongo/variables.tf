@@ -119,6 +119,12 @@ variable "enable_mongo_rs_initiate" {
   description = "role-overlay-mongo-rs-initiate.tf -- one-shot probe-then-init for the 3-member RS + smoke-rw user + write/read round-trip (0.G.2 exit gate)."
 }
 
+variable "enable_mongo_operator_user" {
+  type        = bool
+  default     = true
+  description = "role-overlay-mongo-operator-user.tf -- idempotent createUser of the nexus-cluster-admin operator user (clusterMonitor + clusterManager) that the nexus-cli MongoAdapter authenticates as. Password read on-node via the node's own Vault Agent token from nexus/oltp/mongo/operator-password (never written to disk). Pre-req: nexus-infra-vmware/envs/security applied first (operator-password seeded + mongo-agent policy v3 grants read)."
+}
+
 # ─── Operator + cross-env coupling vars ───────────────────────────────────
 
 variable "oltp_node_user" {
