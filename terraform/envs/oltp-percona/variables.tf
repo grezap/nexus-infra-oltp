@@ -154,6 +154,12 @@ variable "enable_galera_cluster_bootstrap" {
   description = "role-overlay-percona-galera-bootstrap.tf -- one-shot: bootstrap pxc-node-1, create wsrep_sst/clustercheck/smoke-rw users, start joiners 2+3 via SST, rolling-restart node-1 bootstrap.service -> nexus-percona.service. v3 bootstrap ordering per 0.G.3 ratification transient #15."
 }
 
+variable "enable_percona_operator_user" {
+  type        = bool
+  default     = true
+  description = "role-overlay-percona-operator-user.tf -- idempotent CREATE USER nexus-cluster-admin@'%' (ALL PRIVILEGES WITH GRANT OPTION) that the nexus-cli PerconaAdapter authenticates as. Password read on-node via the node's own Vault Agent token from nexus/oltp/percona/operator-password (never written to disk). Pre-req: nexus-infra-vmware/envs/security applied first (operator-password seeded + percona PXC agent-policy v2 grants read)."
+}
+
 variable "enable_proxysql_config" {
   type        = bool
   default     = true

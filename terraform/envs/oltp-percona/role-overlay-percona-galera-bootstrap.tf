@@ -262,8 +262,12 @@ if ! sudo grep -qE '^!include\s+/etc/nexus-percona/sst-auth\.cnf' /etc/nexus-per
   # !include never fires. sed -e '\$a\\' is a no-op idempotent ensure-
   # newline operation. Belt-and-braces with the chunk 3b render's
   # trailing blank line. Transient #16 in handbook s3.x.
-  sudo sed -i -e '\$a\\' /etc/nexus-percona/wsrep.cnf
-  echo '!include /etc/nexus-percona/sst-auth.cnf' | sudo tee -a /etc/nexus-percona/wsrep.cnf > /dev/null
+  # Prepend a newline so the !include lands on its own line regardless of a
+  # missing trailing LF. Replaces an older sed append whose dollar-a token was
+  # eaten by PowerShell @"..."@ here-string interpolation (rendered a malformed
+  # sed expression -> "sed: missing command"). Runs once (guarded by the grep
+  # above), so the leading blank line is harmless. v0.6.2 fix 2026-06-05.
+  printf '\n!include /etc/nexus-percona/sst-auth.cnf\n' | sudo tee -a /etc/nexus-percona/wsrep.cnf > /dev/null
 fi
 echo SST_AUTH_OK
 "@

@@ -6,6 +6,23 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — nexus-cli v0.6.2 PerconaAdapter — `nexus-cluster-admin` operator user (oltp-percona env, 2026-06-05)
+
+- **`terraform/envs/oltp-percona/role-overlay-percona-operator-user.tf`** — idempotent CREATE USER
+  of the dedicated operator user **`nexus-cluster-admin`@'%'** (ALL PRIVILEGES WITH GRANT OPTION) that
+  the nexus-cli PerconaAdapter authenticates as. The password is read **on-node** via the PXC node's
+  own Vault Agent token (`vault kv get nexus/oltp/percona/operator-password`) and **never written to
+  disk**; the user is created via the root-socket `nexus-pxc-mysql` wrapper and **Galera replicates it
+  to all 3 PXC nodes**; the overlay verifies the user over TLS (`SHOW STATUS LIKE wsrep_cluster_size`).
+  New toggle `enable_percona_operator_user` (default true). Runs after `percona_galera_bootstrap`;
+  **proven in a from-zero cold-rebuild** apply graph. Pre-req: nexus-infra-vmware **security** env
+  applied first (operator-password seed + PXC agent-policy v2 read grant). See `nexus-cli` ADR-0012 +
+  `docs/verification/0.G.3-percona.md`.
+- **Fixed (galera-bootstrap):** `role-overlay-percona-galera-bootstrap.tf` step 6 — the `sed -e '$a\'`
+  newline-ensure had its `$a` eaten by PowerShell `@"..."@` here-string interpolation (rendered a
+  malformed sed → "sed: missing command"), failing a from-zero apply; replaced with a `printf '\n…\n'`
+  append (no `$`). A latent bug that only surfaced on a clean from-zero bootstrap.
+
 ### Added — nexus-cli v0.6.1 MongoAdapter — `nexus-cluster-admin` operator user (oltp-mongo env, 2026-06-05)
 
 - **`terraform/envs/oltp-mongo/role-overlay-mongo-operator-user.tf`** — idempotent createUser of the
