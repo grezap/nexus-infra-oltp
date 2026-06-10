@@ -209,6 +209,12 @@ variable "enable_patroni_bootstrap" {
   description = "role-overlay-patroni-bootstrap.tf -- one-shot: render patroni.yml on the 3 Patroni nodes, start nexus-patroni.service in parallel, wait for one PRIMARY + 2 SECONDARY + psql round-trip."
 }
 
+variable "enable_patroni_operator_user" {
+  type        = bool
+  default     = true
+  description = "role-overlay-patroni-operator-user.tf -- one-shot idempotent CREATE ROLE nexus-cluster-admin (the dedicated least-priv PostgreSQL operator role the nexus-cli v0.6.3 PatroniAdapter authenticates as). Password lives ONLY in Vault KV (nexus/oltp/patroni/operator-password); read on the leader via the node's own Vault Agent token, never to disk. Mirrors the 0.G.2 mongo + 0.G.3 percona operator-user overlays. Pre-req: nexus-infra-vmware security env applied (operator-password seeded + patroni agent policy v3 grants read)."
+}
+
 variable "enable_haproxy_config" {
   type        = bool
   default     = true

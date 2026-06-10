@@ -41,7 +41,7 @@ resource "null_resource" "haproxy_config" {
   triggers = {
     tls_id               = null_resource.patroni_tls[each.key].id
     patroni_bootstrap_id = length(null_resource.patroni_bootstrap) > 0 ? null_resource.patroni_bootstrap[0].id : "disabled"
-    haproxy_config_v     = "2" # v2 (0.G.4) = HA pair: render config on BOTH haproxy-pg-{1,2}. v1 was the abandoned single-HAProxy variant.
+    haproxy_config_v     = "3" # v3 (nexus-cli v0.6.3, 2026-06-11) = drop the `chroot /var/lib/haproxy` directive — incompatible with the unit's User=haproxy (cold start 500'd "Cannot chroot"); a latent bug the v0.6.3 cold-rebuild surfaced. v2 (0.G.4) = HA pair: render config on BOTH haproxy-pg-{1,2}. v1 was the abandoned single-HAProxy variant.
 
     destroy_vm_ip    = each.value.vm_ip
     destroy_ssh_user = var.oltp_node_user
@@ -68,7 +68,13 @@ resource "null_resource" "haproxy_config" {
 global
     log         /dev/log local0
     log         /dev/log local1 notice
-    chroot      /var/lib/haproxy
+    # NO `chroot` here: the systemd unit runs nexus-haproxy as `User=haproxy`
+    # (unprivileged), and chroot(2) needs root / CAP_SYS_CHROOT -- so a
+    # `chroot` directive 500s the cold start with "Cannot chroot(/var/lib/haproxy)"
+    # (the haproxy-native start-as-root-then-drop mechanism is mutually exclusive
+    # with systemd's User=haproxy unprivileged start). systemd's User=haproxy IS
+    # the privilege drop; the tmpfs /run/nexus-haproxy comes from the unit's
+    # RuntimeDirectory=. (0.G.4 nexus-cli v0.6.3 cold-rebuild live-caught.)
     stats       socket /run/nexus-haproxy/admin.sock mode 660 level admin
     stats       timeout 30s
     user        haproxy

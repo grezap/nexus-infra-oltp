@@ -45,7 +45,7 @@ resource "null_resource" "patroni_bootstrap" {
     tls_ids             = join(",", [for host in keys(local.patroni_nodes_active) : null_resource.patroni_tls[host].id])
     etcd_bootstrap_id   = length(null_resource.etcd_bootstrap) > 0 ? null_resource.etcd_bootstrap[0].id : "disabled"
     scope               = var.patroni_scope
-    patroni_bootstrap_v = "1" # v1 (0.G.4) = initial 3-node Patroni cluster bootstrap with PG 17 + etcd3 DCS + watchdog off + scram-sha-256 password hashing.
+    patroni_bootstrap_v = "2" # v2 (nexus-cli v0.6.3 PatroniAdapter, 2026-06-11) = +ctl: block (patronictl client cert for state-changing REST calls; switchover/failover would otherwise 403). v1 (0.G.4) = initial 3-node Patroni cluster bootstrap with PG 17 + etcd3 DCS + watchdog off + scram-sha-256 password hashing.
   }
 
   depends_on = [null_resource.patroni_tls, null_resource.etcd_bootstrap]
@@ -165,6 +165,19 @@ postgresql:
 
 watchdog:
   mode: off
+
+# patronictl client config -- the Patroni REST API runs verify_client: optional,
+# which REQUIRES a client cert for state-changing calls (POST /switchover,
+# /failover, /restart, /reinitialize). Without a `ctl:` block patronictl presents
+# no client cert and those calls 403 "client certificate required" (0.G.4
+# nexus-cli v0.6.3 live-caught). The node's own server cert doubles as the client
+# cert (CA-signed; verify_client accepts any CA-signed cert). Read-only GETs
+# (/leader, /health) stay unauthenticated for HAProxy's httpchk probes.
+ctl:
+  insecure: false
+  cacert: /etc/nexus-patroni/tls/ca.pem
+  certfile: /etc/nexus-patroni/tls/server-cert.pem
+  keyfile: /etc/nexus-patroni/tls/server-key.pem
 
 tags:
   nofailover: false

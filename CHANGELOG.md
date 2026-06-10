@@ -6,6 +6,48 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — nexus-cli v0.6.3 PatroniAdapter — `nexus-cluster-admin` operator role + patroni.yml `ctl:` block (oltp-patroni env, 2026-06-11)
+
+- **`terraform/envs/oltp-patroni/role-overlay-patroni-operator-user.tf`** — idempotent `CREATE ROLE`
+  of the dedicated operator role **`nexus-cluster-admin`** (LOGIN CREATEROLE CREATEDB REPLICATION +
+  pg_monitor/pg_read_all_data/pg_write_all_data — **not** a PostgreSQL superuser) that the nexus-cli
+  PatroniAdapter authenticates as. The overlay discovers the current Patroni leader (via
+  `nexus-patronictl`), reads the password **on the leader** via that node's own Vault Agent token
+  (`vault kv get nexus/oltp/patroni/operator-password`) — **never written to disk** — creates the
+  role via the leader's local postgres unix socket (peer auth), and verifies scram auth over TLS
+  against the leader's VMnet11 listener. The role is a global object → WAL-replicated to the 2
+  streaming replicas. Gated on `var.enable_patroni_operator_user`. Mirrors the 0.G.2 mongo + 0.G.3
+  percona operator-user overlays.
+- **`role-overlay-patroni-bootstrap.tf`** — added a **`ctl:` block** to the rendered patroni.yml
+  (`cacert`/`certfile`/`keyfile` = the node's own TLS files). Patroni's REST API runs
+  `verify_client: optional`, which **requires** a client cert for state-changing calls (POST
+  `/switchover`, `/failover`); without `ctl:` patronictl presented no client cert and those calls
+  403'd ("client certificate required"). The CA-signed server cert doubles as the client cert. `ctl:`
+  is client-only, so no service restart is needed. `patroni_bootstrap_v` bumped **1 → 2**.
+- Cross-env prerequisite: `nexus-infra-vmware` `security` env applied first (operator-password seeded
+  + Patroni agent-policy v3 grants read on it).
+
+### Fixed — HAProxy cold-start chroot conflict (oltp-patroni env, 2026-06-11)
+
+- **`role-overlay-haproxy-config.tf`** (v2 → v3) — dropped the `chroot /var/lib/haproxy` directive from
+  the rendered `haproxy.cfg`. The `nexus-haproxy.service` unit runs `User=haproxy` (unprivileged), and
+  `chroot(2)` needs root / `CAP_SYS_CHROOT` — so a fresh node failed every start with
+  "Cannot chroot(/var/lib/haproxy)" (StartLimitBurst hit; no pg_pool backend ever UP). The two
+  privilege-drop mechanisms (haproxy-native `user/group/chroot` vs systemd `User=`) are mutually
+  exclusive; `User=haproxy` already provides the drop and the unit's `RuntimeDirectory=nexus-haproxy`
+  provides the tmpfs `/run/nexus-haproxy`. A **latent bug surfaced by the v0.6.3 from-zero
+  cold-rebuild** (the running cluster's haproxy had only ever been started once, pre-rebuild).
+
+### Verified — Phase 0.G.4 cold-rebuild PROVEN (2026-06-11)
+
+- Full from-zero **cold-rebuild** of the oltp-patroni cluster (destroy 47 resources → apply → smoke)
+  ran end-to-end **all green** with the new operator-user overlay + the patroni.yml `ctl:` block + the
+  haproxy fix proven in the apply graph, and the **correct non-x86 `vmrun_path` baked** into fresh
+  state (retiring the [[stale-vmrun-path-in-clone-vm-state]] trap for this cluster).
+  `smoke-0.G.4.ps1` ALL CHECKS PASSED; the nexus-cli PatroniAdapter verb matrix re-ran green against
+  the rebuilt cluster. One `vmrun start` "Unknown error" transient on pg-replica-1 (re-run apply
+  cleared it, per [[vmrun-unknown-error-transient]]).
+
 ### Added — nexus-cli v0.6.2 PerconaAdapter — `nexus-cluster-admin` operator user (oltp-percona env, 2026-06-05)
 
 - **`terraform/envs/oltp-percona/role-overlay-percona-operator-user.tf`** — idempotent CREATE USER
