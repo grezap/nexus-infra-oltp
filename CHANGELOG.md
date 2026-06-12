@@ -6,6 +6,21 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — nexus-cli v0.6.6 SqlFci/SqlAg adapters — `nexus-cluster-admin` SQL login (oltp-sqlserver env, 2026-06-12)
+
+- **`terraform/envs/oltp-sqlserver/role-overlay-sqlserver-operator-login.tf`** — idempotent
+  `CREATE LOGIN` of the dedicated operator SQL login **`nexus-cluster-admin`** (granted **sysadmin** —
+  the AG/cluster DDL `ALTER AVAILABILITY GROUP`, `BACKUP`/`RESTORE`, `CREATE LOGIN` realistically needs
+  it) that the nexus-cli `SqlFciAdapter` + `SqlAgAdapter` authenticate as. The overlay reads the
+  operator password **on the FCI active node** via that node's own Vault Agent token
+  (`vault kv get -field=password nexus/oltp/sqlserver/operator-password`) — **never written to disk** —
+  runs `CREATE LOGIN … WITH PASSWORD` (if absent, else converge) + `ALTER SERVER ROLE sysadmin ADD
+  MEMBER` via the schtasks domain-task (`NEXUS\nexusadmin`, the FCI sysadmin), then verifies the login
+  authenticates. Gated by `var.enable_sqlserver_operator_login` (default true). Mirrors the
+  clickhouse/starrocks/patroni operator-user overlays; the FCI is mixed-mode so the SQL-login auth works.
+  Live-verified: `nexus acl sqlserver list` shows the login as a sysadmin SQL_LOGIN; `nexus health`
+  authenticates as it.
+
 ### Added — nexus-cli v0.6.3 PatroniAdapter — `nexus-cluster-admin` operator role + patroni.yml `ctl:` block (oltp-patroni env, 2026-06-11)
 
 - **`terraform/envs/oltp-patroni/role-overlay-patroni-operator-user.tf`** — idempotent `CREATE ROLE`
