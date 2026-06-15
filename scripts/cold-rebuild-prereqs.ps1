@@ -47,8 +47,12 @@ param(
 $ErrorActionPreference = 'Stop'
 
 function Invoke-RemotePs([string]$ip, [string]$script) {
-  $b64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script))
-  & ssh -i $SshKey -o StrictHostKeyChecking=no "$SshUser@$ip" "powershell -NoProfile -EncodedCommand $b64" 2>$null | Out-String
+  # Prepend a progress-suppressor so Import-Module ActiveDirectory doesn't spew
+  # CLIXML progress records onto stdout (which masked the real output, 2026-06-12).
+  $wrapped = "`$ProgressPreference='SilentlyContinue';`n" + $script
+  $b64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($wrapped))
+  # Merge stderr so a connection/auth failure is visible (not silently swallowed).
+  & ssh -i $SshKey -o StrictHostKeyChecking=no "$SshUser@$ip" "powershell -NoProfile -EncodedCommand $b64" 2>&1 | Out-String
 }
 
 # ── 1. AD + DNS cleanup (dc-nexus) ──────────────────────────────────────────
@@ -61,9 +65,19 @@ Import-Module ActiveDirectory -ErrorAction SilentlyContinue
 foreach ($n in @('SQL-FCI-1','SQL-FCI-2','SQL-AG-REP-1','SQL-AG-REP-2','sql-fci-cluster','sqlfci','sql-ag-listener')) {
   $c = Get-ADComputer -Identity $n -Properties ProtectedFromAccidentalDeletion -ErrorAction SilentlyContinue
   if ($c) {
-    if ($c.ProtectedFromAccidentalDeletion) { Set-ADObject -Identity $c.DistinguishedName -ProtectedFromAccidentalDeletion $false -ErrorAction SilentlyContinue }
-    try { Remove-ADObject -Identity $c.DistinguishedName -Recursive -Confirm:$false -ErrorAction Stop; Write-Output ("RM_COMP $n: removed") }
-    catch { try { Remove-ADComputer -Identity $n -Confirm:$false -ErrorAction Stop; Write-Output ("RM_COMP $n: removed(2)") } catch { Write-Output ("RM_COMP $n: ERR " + $_.Exception.Message) } }
+    # ALWAYS clear the accidental-deletion protection first (a Deny-Everyone
+    # Delete/DeleteTree ACE that blocks even the owner). Then a PLAIN Remove-ADObject
+    # (the WSFC CNO is a leaf; -Recursive returns "Access is denied" on it -- cold-
+    # rebuild 2026-06-12). Fall back to Remove-ADComputer. Simple flat form: a
+    # foreach/switch here parse-failed inside the base64 EncodedCommand (2026-06-15).
+    try { Set-ADObject -Identity $c.DistinguishedName -ProtectedFromAccidentalDeletion $false -ErrorAction SilentlyContinue } catch {}
+    try {
+      Remove-ADObject -Identity $c.DistinguishedName -Confirm:$false -ErrorAction Stop
+      Write-Output ("RM_COMP $n: removed")
+    } catch {
+      try { Remove-ADComputer -Identity $n -Confirm:$false -ErrorAction Stop; Write-Output ("RM_COMP $n: removed(2)") }
+      catch { Write-Output ("RM_COMP $n: ERR " + $_.Exception.Message) }
+    }
   } else { Write-Output ("RM_COMP $n: absent") }
 }
 # DNS A records in nexus.lab
@@ -72,7 +86,14 @@ foreach ($d in @('sqlfci','sql-ag-listener','sql-fci-cluster')) {
   if ($r) { Remove-DnsServerResourceRecord -ZoneName nexus.lab -Name $d -RRType A -Force -ErrorAction SilentlyContinue; Write-Output ("RM_DNS $d: removed") } else { Write-Output ("RM_DNS $d: absent") }
 }
 '@
-  Invoke-RemotePs -ip $DcIp -script $adClean | ForEach-Object { $_.Split("`n") } | Where-Object { $_ -match 'RM_COMP|RM_DNS' } | ForEach-Object { Write-Host "  $($_.Trim())" }
+  $adOut = Invoke-RemotePs -ip $DcIp -script $adClean
+  $adLines = @($adOut.Split("`n") | Where-Object { $_ -match 'RM_COMP|RM_DNS' })
+  if ($adLines.Count -eq 0) {
+    Write-Host "  WARN: AD cleanup returned no RM_COMP/RM_DNS lines — raw output below (verify dc-nexus reachable + AD module present):" -ForegroundColor Yellow
+    Write-Host ($adOut.Trim())
+  } else {
+    $adLines | ForEach-Object { Write-Host "  $($_.Trim())" }
+  }
 }
 
 # ── 2. iSCSI LUN wipe (nexus-gateway) ───────────────────────────────────────

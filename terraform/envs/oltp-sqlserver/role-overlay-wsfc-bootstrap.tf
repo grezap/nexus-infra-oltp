@@ -87,22 +87,21 @@ try {
     Write-Output ('CLUSTER_CREATED: ' + (Get-Cluster).Name);
   }
 
-  # Add the iSCSI LUN as a Cluster Shared Volume (CSV).
+  # Add the iSCSI LUN as a clustered Physical Disk in 'Available Storage' -- NOT a
+  # Cluster Shared Volume. A single-instance FCI takes a DEDICATED clustered disk
+  # with a drive letter (set to S: by the fci-install disk-prep step). A CSV mounts
+  # at C:\ClusterStorage\VolumeN with NO drive letter, which setup.exe
+  # /ACTION=InstallFailoverCluster /INSTALLSQLDATADIR=S:\SQLData cannot consume ->
+  # disk-prep's Set-Partition -NewDriveLetter S then fails FCI_DISK_FAIL.
+  # Cold-rebuild 2026-06-15: removed the prior Add-ClusterSharedVolume (a regression
+  # carried since the 0.G.7 scaffold; incompatible with the fci-install disk-prep).
   `$availDisk = Get-ClusterAvailableDisk -ErrorAction SilentlyContinue | Where-Object { `$_.Size -gt 50GB };
   if (`$availDisk) {
     `$availDisk | Add-ClusterDisk | Out-Null;
-    `$clusDisk = Get-ClusterResource | Where-Object { `$_.ResourceType -eq 'Physical Disk' -and `$_.State -eq 'Online' } | Select-Object -First 1;
-    if (`$clusDisk) {
-      Add-ClusterSharedVolume -InputObject `$clusDisk | Out-Null;
-      Write-Output ('CSV_ADDED: ' + `$clusDisk.Name);
-    }
+    Write-Output 'CLUSTERDISK_ADDED';
   } else {
-    `$existingCsv = Get-ClusterSharedVolume -ErrorAction SilentlyContinue;
-    if (`$existingCsv) {
-      Write-Output ('CSV_ALREADY: ' + `$existingCsv.Name);
-    } else {
-      Write-Output 'WARN: no available iSCSI disk to add as CSV';
-    }
+    `$pd = Get-ClusterResource -ErrorAction SilentlyContinue | Where-Object { `$_.ResourceType -eq 'Physical Disk' };
+    if (`$pd) { Write-Output ('CLUSTERDISK_ALREADY: ' + `$pd[0].Name) } else { Write-Output 'WARN: no available iSCSI disk to add' }
   }
 
   # Report final cluster state.
