@@ -6,6 +6,32 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed — Platform CA rollover: `oltp-redis` cold-rebuilt to the new Vault PKI root (2026-06-28)
+
+- **`oltp-redis` (6 nodes, mTLS-only) cold-rebuilt onto the v0.8.1-greenfield Vault root** as the first
+  step of the paced platform CA rollover (the tier was left OLD-root because it was offline during the
+  2026-06-18/19 Vault greenfield). No source `.tf` changed — the env + module `vmrun_path` defaults were
+  already non-x86 from a prior cold-rebuild, and redis is mTLS-only so there is **no Vault-KV password
+  drift to reconcile** (the citus/Patroni cred-drift hazard does not apply). Pre-flight: the 6 per-host
+  AppRole sidecars (`~/.nexus/vault-agent-oltp-redis-redis-{1..6}.json`, dated the Jun-19 greenfield)
+  were verified to AppRole-login against the current root before the rebuild.
+- **Operation:** `oltp-redis.ps1 destroy` (38 destroyed — the stale-x86 `vmrun_path` baked in the prior
+  clone_vm state errors non-terminating in the destroy-provisioner, so `Remove-Item` still unlocks +
+  removes each off VM dir; clean, no zombies) → `apply` with `TF_CLI_ARGS_apply=-parallelism=3` (the
+  VMnet10 power-on-storm guard) → **`smoke-0.G.1` ALL PASSED** (`cluster_state:ok`, 3 masters + 3
+  replicas, 16384 slots assigned, cross-shard SET/GET round-trip, mutual TLS on every node). Fresh clones
+  bake the correct non-x86 `vmrun_path` into state, retiring the stale-path trap for this cluster.
+- **CA-rollover proof — `nexus cert-rotate redis` GREEN** (all 6 nodes, fresh leaf serials, 0 errors,
+  ~13s): this verb **x509/403-fails on an old-root cluster** (the node Vault Agent cannot authenticate to
+  the new Vault PKI to issue a leaf) and **succeeds only post-rebuild** — the definitive confirmation the
+  tier is now new-root. Full verb matrix re-run GREEN on the rebuilt cluster: `status` / `topology`
+  (3 shards + slot ranges) / `health` (replicas natively `state=online lag=1`; the adapter's idle
+  replication-lag metric reads up to the `repl-ping-replica-period` and shows benign yellow on a
+  write-idle cluster) / `backup take` (774 B, 3 shard-primary `.rdb`) / `acl list+grant+revoke`
+  (cluster-wide `SETUSER`/`DELUSER` round-trip) / `chaos process-kill` on a replica (recovered).
+- **Node reality:** the 6 redis mgmt IPs are **non-contiguous** — redis-1..6 = `.81 .82 .83 .84 .87 .89`
+  on VMnet11 (backplane `.10.x` mirror), dual-NIC (ethernet0 VMnet11, ethernet1 VMnet10).
+
 ### Added — nexus-cli v0.6.6 SqlFci/SqlAg adapters — `nexus-cluster-admin` SQL login (oltp-sqlserver env, 2026-06-12)
 
 - **`terraform/envs/oltp-sqlserver/role-overlay-sqlserver-operator-login.tf`** — idempotent
