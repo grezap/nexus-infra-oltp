@@ -6,6 +6,40 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed — Platform CA rollover: `oltp-mongo` cold-rebuilt to the new Vault PKI root (2026-06-28)
+
+- **`oltp-mongo` (3 nodes, mongo-1/2/3 @ `.71/.72/.73`, mTLS + keyFile internal auth) cold-rebuilt onto
+  the v0.8.1-greenfield Vault root** as the second step of the paced platform CA rollover (the tier was
+  left OLD-root because it was offline during the 2026-06-18/19 Vault greenfield). No source `.tf`
+  changed — the env + module `vmrun_path` defaults + the baked clone_vm state were already non-x86 (so the
+  stale-x86 destroy trap did **not** apply, unlike redis), and the rebuild reads the **current** Vault KV
+  for both role creation and config rendering so the citus/Patroni in-place cred-drift hazard does **not**
+  apply (a cold rebuild's `createUser` and the vault-agent template both read the same KV value → consistent
+  by construction).
+- **KV-cred pre-flight (the citus lesson):** the 3 per-host AppRole sidecars
+  (`~/.nexus/vault-agent-oltp-mongo-mongo-{1,2,3}.json`, dated the Jun-19 greenfield) were verified to
+  AppRole-login against the current root; the `nexus-agent-mongo-*` policy was confirmed to grant read on
+  `nexus/data/oltp/mongo/{keyfile,operator-password,smoke-user-password}`; and all three KV values were
+  confirmed present (v1) before the rebuild.
+- **Operation:** `oltp-mongo.ps1 destroy` (21 destroyed — clean, no zombies; VMs were already off) →
+  `apply` with `TF_CLI_ARGS_apply=-parallelism=3` (the VMnet10 power-on-storm guard) → **`smoke-0.G.2`
+  ALL PASSED** (`requireTLS` + per-node Vault PKI leaf, `allowConnectionsWithoutCertificates=false`,
+  shared keyFile, **`ca.crt` now carries both intermediate AND the new root**, 1 PRIMARY + 2 SECONDARY all
+  healthy, replicated write/read round-trip via `readConcern=majority`). The `rs.initiate` + `smoke-rw`
+  + `nexus-cluster-admin` operator bootstraps all completed first-try (operator user created from the
+  CURRENT KV `operator-password` and verified against the live RS — 1 PRIMARY, 3 members). **Zero
+  transients.**
+- **CA-rollover proof — `nexus cert-rotate mongo` GREEN** (all 3 nodes, fresh leaf serials, 0 errors,
+  ~68s): this verb issues each new leaf via the node's **own** Vault Agent token against
+  `pki_int/issue/mongo-server`, so it **x509-fails on an old-root cluster** (the agent cannot authenticate
+  to the new Vault PKI) and **succeeds only post-rebuild** — the definitive confirmation the tier is now
+  new-root. Full verb matrix re-run GREEN on the rebuilt cluster: `status` / `health` (overall green,
+  3/3 quorum, 0.0s lag) / `topology` / `backup take` (473 B `mongodump --archive --gzip` on a secondary)
+  / `backup restore` (round-trip into the `nexus_restore_verify` namespace, 2 items, non-destructive)
+  / `acl list` + `grant`/`revoke` (`nexus-verify-user` read@admin granted then revoked) / `chaos
+  process-kill` on mongo-2 (cluster held 2/3 quorum + 1 PRIMARY, then recovered to 3/3) / `failover-test`
+  (RS stepDown on mongo-1 → mongo-2 elected new primary, recovered in ~4.6s).
+
 ### Changed — Platform CA rollover: `oltp-redis` cold-rebuilt to the new Vault PKI root (2026-06-28)
 
 - **`oltp-redis` (6 nodes, mTLS-only) cold-rebuilt onto the v0.8.1-greenfield Vault root** as the first
