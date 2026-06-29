@@ -6,6 +6,29 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed — Platform CA rollover: `oltp-percona` cold-rebuilt to the new Vault PKI root (2026-06-29)
+
+- **`oltp-percona` (5 nodes — pxc-node-1/2/3 Galera + proxysql-1/2, VRRP VIP `.50`) cold-rebuilt onto the
+  v0.8.1-greenfield Vault root** as the fifth tier of the back-to-back CA rollover (Greg waived the
+  1-rebuild/session cap). No source `.tf` changed — env + module + clone_vm-state `vmrun_path` already
+  non-x86. KV-cred tier (Galera cluster/monitor/operator/proxysql-admin/root passwords in Vault KV), but a
+  cold rebuild reads the CURRENT KV for both user creation and config → consistent (the citus in-place
+  cred-drift hazard does not apply). Pre-flight: all 5 AppRole sidecars login-verified + all 5 KV creds
+  confirmed present.
+- **Operation:** `oltp-percona.ps1 destroy` (35, clean) → `apply -parallelism=3` (35 added, **zero
+  transients**; Galera bootstrap node-1 → SST-join 2/3 → rolling-restart, cluster `nexus-pxc` 3 nodes
+  Synced+Primary; `nexus-cluster-admin` operator user created from current KV + TLS-verified). **smoke-0.G.3
+  percona checks ALL PASSED** (Galera size=3 all Synced+Primary, VIP `.50` on the keepalived MASTER,
+  write-via-VIP `:6033` + Galera replication read-back on all 3 PXC nodes, per-node mTLS from the **new-root**
+  `percona-server` PKI). *(The smoke's cross-cluster regression checks for redis-1/mongo-1 "still active"
+  fail by design here — those tiers are intentionally powered off under minimal-running-VMs; the percona
+  nftables push is per-node and cannot affect powered-off tiers.)*
+- **CA-rollover proof — `nexus cert-rotate percona` GREEN** (all 5 nodes, fresh leaf serials, 0 errors,
+  ~95s): x509-fails on old-root, succeeds only post-rebuild. Verb matrix re-run GREEN: `status` (3 PXC +
+  2 ProxySQL, writer drift-read) / `health` (3× Synced+Primary, wsrep-ready ON, ProxySQL active) /
+  `topology` / `backup take` (`mysqldump --single-transaction` of nexus_smoke) / `acl list`
+  (nexus-cluster-admin + clustercheck/smoke-rw/wsrep_sst).
+
 ### Changed — Platform CA rollover: `oltp-mongo` cold-rebuilt to the new Vault PKI root (2026-06-28)
 
 - **`oltp-mongo` (3 nodes, mongo-1/2/3 @ `.71/.72/.73`, mTLS + keyFile internal auth) cold-rebuilt onto
