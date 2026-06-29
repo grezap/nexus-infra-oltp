@@ -6,6 +6,27 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed — Platform CA rollover: `oltp-patroni` (postgres) cold-rebuilt to the new Vault PKI root (2026-06-29)
+
+- **`oltp-patroni` (8 nodes — pg-primary + pg-replica-1/2 [Patroni] + etcd-1/2/3 [DCS] + haproxy-pg-1/2,
+  VRRP VIP `.60`) cold-rebuilt onto the v0.8.1-greenfield Vault root** as the sixth tier of the back-to-back
+  CA rollover. No source `.tf` changed — `vmrun_path` non-x86 throughout. This is the **citus-class** tier
+  (Patroni superuser/replication/rewind roles): the cold rebuild **initializes every PG role from the
+  CURRENT KV** at bootstrap, so it is consistent by construction — the exact scenario the in-place re-cert
+  could NOT achieve (the finding that motivated the cold-rebuild campaign). Pre-flight: all 8 AppRole
+  sidecars login-verified + all 6 KV creds confirmed present.
+- **Operation:** `oltp-patroni.ps1 destroy` (48, clean) → `apply -parallelism=3` (48 added, **zero
+  transients**; etcd 3/3 → Patroni primary init + 2 streaming replicas → HAProxy pair + keepalived VIP `.60`
+  on MASTER) → **`smoke-0.G.4` ALL PASSED** (1 Leader + 2 streaming Replica, `pg_stat_replication` 2
+  entries, write→read round-trip, replicas caught up, HAProxy backends UP + stats basic-auth, VIP bound on
+  exactly one node, end-to-end write via VIP `:5432` routes to the leader over `sslmode=verify-ca` from the
+  **new-root** `patroni-server` PKI).
+- **CA-rollover proof — `nexus cert-rotate postgres` GREEN** (all 8 nodes, fresh leaf serials, 0 errors,
+  ~56s). Verb matrix re-run GREEN: `status` (leader drift-read) / `health` (leader + 2 replicas 0 MB lag,
+  etcd 3/3 quorum, VIP writable, HAProxy active) / `topology` / `backup take` (`pg_dump` of nexus_smoke
+  from a replica) / `acl list` (nexus-cluster-admin/nexusops/postgres/**replicator/rewind** — the latter two
+  proving the rebuild created the Patroni internal roles from current KV).
+
 ### Changed — Platform CA rollover: `oltp-percona` cold-rebuilt to the new Vault PKI root (2026-06-29)
 
 - **`oltp-percona` (5 nodes — pxc-node-1/2/3 Galera + proxysql-1/2, VRRP VIP `.50`) cold-rebuilt onto the
