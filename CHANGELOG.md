@@ -6,6 +6,57 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed — Platform CA rollover: `oltp-sqlserver` rebuilt to the new Vault PKI root — FINAL tier; **platform CA rollover COMPLETE** (2026-07-04/05)
+
+- **`oltp-sqlserver` (4 nodes — sql-fci-1/2 [WSFC FCI sharing an iSCSI LUN from nexus-gateway] +
+  sql-ag-rep-1/2 [Always On AG async replicas]; 3 WSFC-managed VIPs `.15`/`.16`/`.17`) rebuilt onto the
+  v0.8.1-greenfield Vault root** — the **last genuinely-old-root tier**, closing the platform-wide CA
+  rollover. Resumed from the partial TF state left by the 2026-06-29 session (clone/nic/power_on + nftables
+  + domain-join already applied); this session completed vault-agents → TLS → iSCSI → WSFC → FCI → AG →
+  Listener → operator-login from that point. **No source `.tf` changed** (`vmrun_path` non-x86 throughout).
+- **Five drift-induced blockers resolved** (all consequences of the tier last being built 2026-05-22 —
+  before dc-nexus-2 [0.M], the 2026-06-19 foundation-cred rotation, and the greenfield):
+  1. **gMSA/ADWS "auth failure" was a NON-BLOCKER.** `Test-ADServiceAccount gmsa-sql-engine` fails only
+     over the plain-SSH **credential-less local logon** (`sql-fci-1\nexusadmin`, no Kerberos TGT); in the
+     **domain scheduled-task (Password-logon) context** the fci-install/wsfc-bootstrap overlays actually
+     use, it returns **True**. Confirmed live. (Last session mis-diagnosed this over plain SSH.)
+  2. **vault-agents drift.** The stage was in state but inconsistently present across nodes (agent
+     missing/partial on 3 of 4 — Vault was down during a transit boot-race). Recovered Vault HA
+     (`recover-vault-ha.ps1`), re-ran the stage; all 4 nodes now render creds.
+  3. **iSCSI CHAP secret drift (NEW cross-tier CA-drift class).** The greenfield rotated KV
+     `nexus/oltp/sqlserver/iscsi-chap-secret`, but the gateway's `tgt` config kept the old May-21 value —
+     the foundation overlay `role-overlay-gateway-iscsi-sqlfci.tf` is **marker-idempotent (`v1`), so it does
+     NOT re-render on a secret rotation** → `Connect-IscsiTarget` **HRESULT 0xefff0009** (auth failure).
+     Reconciled the gateway `tgt` `incominguser` to current KV (Greg-consented shared-infra write;
+     tier-confined, data-preserving; LUN backing file untouched) + `systemctl restart tgt`.
+  4. **Preserved iSCSI LUN.** The tier destroy deliberately keeps `/srv/iscsi/sql-fci-shared.img`, so it
+     retained the prior build's GPT/NTFS → `Initialize-Disk` "already initialized". Cleared to RAW for the
+     from-zero init (`Clear-Disk -RemoveData`).
+  5. **Stale WSFC/AG AD objects + BROKEN AD replication.** `sql-fci-cluster` (CNO), `sqlfci` (FCI VCO),
+     `sql-ag-listener` (AG VCO) from the prior build blocked `New-Cluster`. Removing them on dc-nexus
+     (`.240`) was **not** enough — AD replication dc-nexus↔dc-nexus-2 had been **broken ~5 days (error
+     8524)** because **dc-nexus-2's DNS pointed at the gateway (`.1`, which does not serve `nexus.lab`)**, so
+     it couldn't resolve the partner `_msdcs` CNAME. Fixed dc-nexus-2 DNS → `.240` + self, forced
+     `repadmin /syncall` (converged, no errors) — restoring the 0.M 2-DC HA and propagating the deletions to
+     both DCs. **FOLLOW-UP:** bake static DNS for dc-nexus-2 into the 0.M terraform (it currently inherits
+     DHCP DNS from the gateway — a latent AD-replication hazard whenever it is offline then powered back).
+- **Operation:** staged vault-agents re-run → `apply -parallelism=3` (WSFC `New-Cluster` + clustered disk
+  1m03s → **FCI `setup.exe` InstallFailoverCluster + AddNode 22m11s** → AG bootstrap 5m40s → AG Listener
+  1m40s → operator-login) → **`smoke-0.G.7` 56/56 ALL PASSED** (sections 13/14 disruptive failover deferred
+  to the demo playbook, as designed).
+- **CA-rollover proof — `nexus cert-rotate sqlserver` GREEN** (both FCI nodes, shared FCI virtual-server
+  cert, fresh serial, ~21s) **+ `nexus cert-rotate sqlserver-ag` GREEN** (both AG replicas, per-node fresh
+  serials, ~30s): x509-fails on old-root, succeeds only post-rebuild. Verb matrix re-run GREEN: `status`
+  (fci-active online) / `health` (overall **green** — WSFC 4/4 quorum, FCI role Online on sql-fci-1,
+  shared-disk + both iSCSI sessions green, FCI virtual server answers) / `topology` (all 4 nodes Up) /
+  `backup take` (`BACKUP DATABASE nexus_demo … WITH COPY_ONLY`, 3.2 MiB to `S:\Backups` on the shared iSCSI
+  LUN) / `acl sqlserver list` (`nexus-cluster-admin` SQL_LOGIN sysadmin + `sa` + `NEXUS\Domain Admins` +
+  the gMSA `NT SERVICE\MSSQLSERVER` login).
+- **🏁 PLATFORM CA ROLLOVER COMPLETE.** Every genuinely-old-root tier is now on the v0.8.1-greenfield root:
+  foundation · swarm · observability · lakehouse · analytics · citus · registry · redis · mongo · kafka ·
+  vitess · percona · postgres · **sqlserver**. (mongo-sharded ruled CA-rollover-N/A: no per-node vault
+  agents / no wire TLS → nothing tied to the dead root.)
+
 ### Changed — Platform CA rollover: `oltp-patroni` (postgres) cold-rebuilt to the new Vault PKI root (2026-06-29)
 
 - **`oltp-patroni` (8 nodes — pg-primary + pg-replica-1/2 [Patroni] + etcd-1/2/3 [DCS] + haproxy-pg-1/2,
