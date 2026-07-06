@@ -334,6 +334,16 @@ This is the key win over the legacy monolithic `oltp.ps1 destroy` which would te
 
 **Status: PROVEN end-to-end via per-cluster envs (2026-05-18).** All 3 OLTP clusters rebuild from per-engine templates + per-cluster Terraform states; smoke gates ALL GREEN.
 
+> **CA-rollover cold-rebuild (2026-06-28 → 2026-07-05):** all 6 OLTP clusters were subsequently
+> cold-rebuilt onto the v0.8.1-greenfield Vault PKI root, proving the §3.1 canon a second time from
+> zero — `oltp-redis` (2026-06-28) · `oltp-mongo` (2026-06-28) · `oltp-percona` (2026-06-29) ·
+> `oltp-patroni`/postgres (2026-06-29) · `oltp-sqlserver` FCI+AG (2026-07-05, the FINAL genuinely-old-root
+> tier, closing the platform-wide CA rollover). Each rebuild ran `destroy → apply → smoke ALL GREEN` with
+> `nexus cert-rotate <cluster>` GREEN as the new-root proof (the verb x509-fails on an old-root cluster
+> and succeeds only post-rebuild). `mongo-sharded` (0.N) is CA-rollover-N/A (keyFile-only internal auth,
+> no per-node Vault agents / no wire TLS → nothing tied to the dead root). No source `.tf` changed on any
+> tier. Full per-tier chronology in the CHANGELOG `[Unreleased]` "Platform CA rollover" entries.
+
 Canonical per-cluster cycle (each cluster independent, can be ordered or parallel):
 
 ```pwsh
