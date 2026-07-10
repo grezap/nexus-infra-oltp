@@ -324,7 +324,7 @@ This is the key win over the legacy monolithic `oltp.ps1 destroy` which would te
 | 0.G.4 | Patroni + etcd + HAProxy HA pair + VRRP VIP `.60` (8 nodes) | `terraform/envs/oltp-patroni/` ✅ | `packer/oltp-{patroni,etcd,haproxy}-node/` ✅ (3 per-engine templates; haproxy template bakes keepalived) | `smoke-0.G.4.ps1` ✅ **ALL 152 CHECKS PASSED 2026-05-19** | ✅ **PROVEN end-to-end 2026-05-19** -- foundation v5 + security patroni overlays + 3 Packer templates + per-cluster TF env (7 overlays incl. haproxy-keepalived) + operator wrapper + smoke gate (152 checks, 13 sections) + 4 demo playbooks. 18 transients surfaced + all root-caused + permanent fixes baked into source (full chronology in §3.x). | 2026-05-19 |
 | 0.G.7 | SQL Server FCI + AG (4 ws2025-desktop nodes; 2 FCI + 2 AG-replica) | `terraform/envs/oltp-sqlserver/` ✅ (9 role-overlays) | `packer/oltp-sqlserver-node/` ✅ (from-ISO WS2025 + SQL Server 2025 Developer + WSFC + MPIO features + msiscsi) | `smoke-0.G.7.ps1` ✅ **ALL GREEN 56/56** | ✅ **LIVE-RATIFIED 2026-05-22** — foundation v6 dnsmasq overlay + iSCSI target on nexus-gateway + 5 security sqlserver overlays + 9-overlay per-cluster TF env + operator wrapper + smoke gate. WSFC + FCI (`sqlfci` @ .16) + AG (`nexus-ag`, 2 async replicas SYNCHRONIZING+HEALTHY) + Listener (.17, strict-TLS proven) all live. Hybrid FCI+AG per `vms.yaml` canon (sealed with Greg 2026-05-20). ADR-0026 (iSCSI shared storage) + ADR-0027 (AG endpoint cert auth). 40+ ratification transients root-caused + fixed in source (§3.5b + §3.5c). | 2026-05-22 |
 
-| 0.N | MongoDB sharded cluster (11 nodes: 3 config + 2×3 shards + 2 mongos) | `terraform/envs/oltp-mongo-sharded/` ✅ (5 overlays) | `packer/oltp-mongo-node/` ✅ (shared w/ 0.G.2 RS; +`mongodb-org-mongos`) | `smoke-0.N.ps1` ✅ **ALL GREEN 50/50 2026-05-30** | ✅ **LIVE-RATIFIED 2026-05-30** — foundation v7 dnsmasq overlay (+11 mongo pins) + 5-overlay per-cluster env (nftables → keyfile → config → rs-initiate ×3 → add-shards) + operator wrapper + smoke gate. 3 config RS + shard-1 + shard-2 (all 1P+2S+healthy) + 2 mongos + sharded collection chunked across both shards. ADR-0040. keyFile auth, mTLS deferred to 0.N.1. 9 ratification transients root-caused + fixed in source (§3.N) + 1 cold-rebuild transient (§3.Nb N10 -- `-parallelism=3` for the first apply). **COLD-REBUILD PROVEN 2026-05-30** (template rebuild → destroy → from-zero apply → smoke 50/50). OLTP tier now **6/6 cold-rebuild-proven** (redis + mongo RS + percona + patroni + sqlserver + mongo-sharded). | 2026-05-30 |
+| 0.N | MongoDB sharded cluster (11 nodes: 3 config + 2×3 shards + 2 mongos) | `terraform/envs/oltp-mongo-sharded/` ✅ (5 overlays) | `packer/oltp-mongo-node/` ✅ (shared w/ 0.G.2 RS; +`mongodb-org-mongos`) | `smoke-0.N.ps1` ✅ **ALL GREEN 50/50 2026-05-30** | ✅ **LIVE-RATIFIED 2026-05-30** — foundation v7 dnsmasq overlay (+11 mongo pins) + 5-overlay per-cluster env (nftables → keyfile → config → rs-initiate ×3 → add-shards) + operator wrapper + smoke gate. 3 config RS + shard-1 + shard-2 (all 1P+2S+healthy) + 2 mongos + sharded collection chunked across both shards. ADR-0040. keyFile auth + **0.N.1 wire mTLS** (requireTLS, per-host Vault-PKI certs; §3.Nc — added via a 1-pass 11-VM cold-rebuild 2026-07-10). 9 ratification transients root-caused + fixed in source (§3.N) + 1 cold-rebuild transient (§3.Nb N10 -- `-parallelism=3` for the first apply). **COLD-REBUILD PROVEN 2026-05-30** (template rebuild → destroy → from-zero apply → smoke 50/50). OLTP tier now **6/6 cold-rebuild-proven** (redis + mongo RS + percona + patroni + sqlserver + mongo-sharded). | 2026-05-30 |
 
 (0.G.5 ClickHouse + 0.G.6 StarRocks belong to the sibling `nexus-infra-analytics` repo.)
 
@@ -849,4 +849,25 @@ Selective ops: every overlay + VM is gated by an `enable_*` var (all default `tr
 | # | Symptom | Diagnosis | Fix |
 |---|---|---|---|
 | N10 | Both `mongo-sharded.ps1 apply` (default `-parallelism=10`) and the `cycle` apply failed `power_on`: multiple nodes "Error: Unknown error" / "Error: The operation was canceled" — and once one errors, terraform cancels the in-flight rest, leaving 0 VMs reliably up. Hit on BOTH the live-ratification first apply (N5) and the cold-rebuild. | 11 simultaneous `vmrun clone`+`start` operations overwhelm VMware Workstation's vmrun on this host — not just sporadic (N5), it reproduces with 11 concurrent power-ons. memory `vmrun-unknown-error-transient`. | Run the **first** apply of the 11-VM cluster with `-parallelism=3` so VMs clone+power-on in small batches. The from-zero cold-rebuild then completes in one shot (no retry). The default parallelism is fine for the overlay-only re-applies (VMs already up). |
+
+### §3.Nc 0.N.1 wire mTLS — added by an 11-VM cold-rebuild (2026-07-10)
+
+0.N.1 brought the sharded cluster to **wire-mTLS parity** with the 0.G.2 mongo RS. The from-zero apply
+sequence gained **two overlays** (7 total): `nftables → keyfile → **vault-agents → tls** → config →
+rs-initiate ×3 → add-shards`. New pieces:
+
+- **Prereq (`nexus-infra-vmware` security env):** a `mongo-sharded-server` PKI role (all 11 hostnames) +
+  11 AppRoles + `vault-agent-oltp-mongo-sharded-<host>.json` sidecars — applied via a **targeted apply**
+  (the security env carries pre-existing drift on unrelated LDAP/PKI-root resources; a full apply would
+  replace them, so `-target` only the 3 new mongo-sharded resources).
+- **`role-overlay-mongo-vault-agents.tf`** (per-host Vault Agent) + **`role-overlay-mongo-tls.tf`**
+  (template 70 → `server.pem` leaf+key / `ca.crt` intermediate+root via `mongo-tls-split.sh`; keyFile
+  stays from the build-host `keyfile` overlay). `config` injects `net.tls: requireTLS` + `depends_on` the
+  tls overlay so certs exist before mongod restarts. Every `rs-initiate`/`add-shards` mongosh gains
+  `--tls --tlsCAFile … --tlsCertificateKeyFile …`. No template rebuild (mongod TLS is native).
+- **Rebuild recipe:** `mongo-sharded.ps1 destroy` (70) → `terraform … apply -parallelism=3` →
+  `smoke-0.N.ps1` (now §9 wire-mTLS). **The mTLS cold-rebuild completed in a SINGLE from-zero pass —
+  92 resources, ZERO transients** (all the 0.N N1–N10 fixes are baked in; the TLS layer added none).
+  `nexus cert-rotate mongo-sharded` then rotates all 11 leaves online (`rotateCertificates`, no
+  re-election). See `nexus-cli/docs/verification/0.N.1-mongo-sharded-wire-mtls.md`.
 

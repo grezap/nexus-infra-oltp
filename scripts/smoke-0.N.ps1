@@ -4,7 +4,7 @@
   Phase 0.N smoke gate: 11-VM MongoDB sharded cluster (3 config + 2x3 shards + 2 mongos).
 
 .DESCRIPTION
-  ~50 checks across 8 sections:
+  ~57 checks across 9 sections:
     1. Reachability     -- SSH/22 to all 11 nodes
     2. Engine + ports   -- mongod/mongos service Running + listening on the right port
     3. Config-server RS -- 1 PRIMARY + 2 SECONDARY + all health:1 (RS name "config")
@@ -13,8 +13,11 @@
     6. Sharded topology -- sh.status() via mongos shows 2 shards + balancer enabled
     7. Sharded collection -- nexus_n_smoke.samples has 200 docs distributed across both shards
     8. Mongos routing   -- a {k:50} query via mongos returns the right doc
+    9. Wire mTLS        -- 0.N.1: per-host leaf CN, ca.crt chain, requireTLS
+                           rejects a non-TLS conn, mTLS ping succeeds
 
   Per memory/feedback_smoke_gate_probe_robustness.md: marker tokens + -match (not strict-eq) for multi-line probes.
+  0.N.1: every mongosh connects over mTLS ($tlsArgs folded into $auth/$mongosAuth).
 
 .NOTES
   Reproducibility:
@@ -79,8 +82,12 @@ if (-not $keyfile -or $keyfile.Length -lt 100) {
 # cluster admin user (created by the add-shards overlay on the config servers,
 # password = keyFile content) against the `admin` DB. Invoke-Mongosh selects the
 # right auth by port: mongos port -> admin user; mongod ports -> __system.
-$auth = "--username __system --password '$keyfile' --authenticationDatabase local --authenticationMechanism SCRAM-SHA-256"
-$mongosAuth = "--username nexus-sharded-admin --password '$keyfile' --authenticationDatabase admin"
+# 0.N.1 wire mTLS: every mongosh dials the requireTLS listener presenting the
+# node's own leaf as its client cert. Folded into both auth strings so every
+# check below connects over TLS.
+$tlsArgs = "--tls --tlsCAFile /etc/nexus-mongo/tls/ca.crt --tlsCertificateKeyFile /etc/nexus-mongo/tls/server.pem"
+$auth = "$tlsArgs --username __system --password '$keyfile' --authenticationDatabase local --authenticationMechanism SCRAM-SHA-256"
+$mongosAuth = "$tlsArgs --username nexus-sharded-admin --password '$keyfile' --authenticationDatabase admin"
 
 function Invoke-Mongosh {
     param([Parameter(Mandatory)][string]$Ip, [Parameter(Mandatory)][int]$Port, [Parameter(Mandatory)][string]$Eval)
@@ -229,6 +236,36 @@ Test-Check 'mongos-1: query {k:50} returns a doc' `
 Test-Check 'mongos-2: query {k:100} returns a doc' `
     { Invoke-Mongosh -Ip $MongosIp2 -Port $MongosPort -Eval "var d=db.getSiblingDB('nexus_n_smoke').samples.findOne({k:100}); print(d ? d.v : 'NULL')" } `
     { param($o) $o.Trim() -eq 'data-100' }
+
+# ─── 9. Wire mTLS (0.N.1) ─────────────────────────────────────────────────
+Write-Section '9. Wire mTLS (0.N.1 -- Vault-PKI per-host certs + requireTLS)'
+
+# Each node presents a per-host leaf whose CN = <host>.mongo.nexus.lab.
+$tlsNodes = @(
+    @{ Name='mongo-cfg-1';     Ip=$CfgIp1 },    @{ Name='mongo-shard-1-1'; Ip=$Shard1Ip1 },
+    @{ Name='mongo-shard-2-1'; Ip=$Shard2Ip1 }, @{ Name='mongo-mongos-1';  Ip=$MongosIp1 }
+)
+foreach ($n in $tlsNodes) {
+    $node = $n
+    Test-Check "$($node.Name): leaf CN = $($node.Name).mongo.nexus.lab" `
+        { ssh @sshOpts "$user@$($node.Ip)" "sudo openssl x509 -in /etc/nexus-mongo/tls/server.pem -noout -subject 2>/dev/null" } `
+        { param($o) $o -match "$($node.Name)\.mongo\.nexus\.lab" }
+}
+
+# ca.crt walks to a self-signed root anchor (intermediate + root).
+Test-Check 'mongo-cfg-1: ca.crt contains >= 2 certs (intermediate + root)' `
+    { ssh @sshOpts "$user@$CfgIp1" "grep -c 'BEGIN CERTIFICATE' /etc/nexus-mongo/tls/ca.crt 2>/dev/null || sudo grep -c 'BEGIN CERTIFICATE' /etc/nexus-mongo/tls/ca.crt" } `
+    { param($o) try { [int]$o.Trim() -ge 2 } catch { $false } }
+
+# requireTLS is enforced: a NON-TLS mongosh connection is rejected.
+Test-Check 'config-server rejects a non-TLS connection (requireTLS enforced)' `
+    { ssh @sshOpts "$user@$CfgIp1" "sudo mongosh --quiet --host 127.0.0.1:$CfgPort --eval 'db.adminCommand({ping:1})' 2>&1; echo RC=`$?" } `
+    { param($o) $o -match 'RC=[^0]' -or $o -match 'closed|TLS|SSL|no reachable|MongoNetworkError' }
+
+# A full mTLS ping (via Invoke-Mongosh, which now carries $tlsArgs) succeeds.
+Test-Check 'config-server accepts an mTLS-authenticated ping' `
+    { Invoke-Mongosh -Ip $CfgIp1 -Port $CfgPort -Eval "print(db.adminCommand({ping:1}).ok)" } `
+    { param($o) $o.Trim() -eq '1' }
 
 # ─── Summary ──────────────────────────────────────────────────────────────
 Write-Host ''

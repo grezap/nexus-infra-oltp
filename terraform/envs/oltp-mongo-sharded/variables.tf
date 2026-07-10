@@ -192,7 +192,38 @@ variable "enable_mongo_add_shards" {
   description = "After all 3 RSes are healthy + mongos pair is up, run sh.addShard for shard-1 + shard-2 via mongos."
 }
 
+# ─── Phase 0.N.1 — wire mTLS toggles ──────────────────────────────────────
+variable "enable_mongo_vault_agents" {
+  type        = bool
+  default     = true
+  description = "0.N.1: install a per-host Vault Agent (nexus-vault-agent.service) on all 11 sharded-mongo nodes (reads the vault-agent-oltp-mongo-sharded-<host>.json sidecars from the security env)."
+}
+
+variable "enable_mongo_tls" {
+  type        = bool
+  default     = true
+  description = "0.N.1: render per-host PKI leaf certs (server.pem + ca.crt) via the Vault Agent + enable requireTLS in mongod.conf/mongos.conf. Requires enable_mongo_vault_agents."
+}
+
 # ─── Operator / cross-env vars ────────────────────────────────────────────
+
+variable "vault_agent_version" {
+  type        = string
+  default     = "1.18.5"
+  description = "0.N.1: Vault Agent binary version installed on each sharded-mongo node (matches every prior tier)."
+}
+
+variable "vault_agent_mongo_sharded_creds_dir" {
+  type        = string
+  default     = "$HOME/.nexus"
+  description = "0.N.1: build-host dir holding the 11 vault-agent-oltp-mongo-sharded-<host>.json AppRole sidecars (written by the security env)."
+}
+
+variable "vault_pki_mongo_sharded_role_name" {
+  type        = string
+  default     = "mongo-sharded-server"
+  description = "0.N.1: PKI role under pki_int/ for the sharded-mongo leaf certs (created by the security env's role-overlay-vault-pki-mongo-sharded.tf)."
+}
 
 variable "oltp_node_user" {
   type    = string

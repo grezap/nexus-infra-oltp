@@ -102,10 +102,13 @@ resource "null_resource" "mongo_add_shards" {
       # via __system, then auth all mongos operations as that user against
       # admin. createUser is a write -> the config RS URI routes to PRIMARY.
       # Idempotent: catch "already exists".
+      # 0.N.1 wire mTLS: every mongosh dials the requireTLS listener with the
+      # node's own leaf as its client cert (empty when TLS is disabled).
+      $tlsArgs   = '${var.enable_mongo_tls ? "--tls --tlsCAFile /etc/nexus-mongo/tls/ca.crt --tlsCertificateKeyFile /etc/nexus-mongo/tls/server.pem" : ""}'
       $cfgIp     = '${local.config_bootstrap_ip}'
       $cfgRsUri  = '${local.config_rs_uri}'
       $adminUser = '${local.cluster_admin_user}'
-      $sysAuth   = "--username __system --password '$keyfileContent' --authenticationDatabase local --authenticationMechanism SCRAM-SHA-256"
+      $sysAuth   = "$tlsArgs --username __system --password '$keyfileContent' --authenticationDatabase local --authenticationMechanism SCRAM-SHA-256"
       Write-Host "[add-shards] ensuring cluster admin user '$adminUser' on the config-server RS (auth __system, routes to PRIMARY)..."
       $createEval = "try{db.getSiblingDB('admin').createUser({user:'$adminUser',pwd:'$keyfileContent',roles:[{role:'root',db:'admin'}]});print('USER_CREATED')}catch(e){if(e.codeName==='Location51003'||e.message.indexOf('already exists')>=0){print('USER_EXISTS')}else{print('USER_ERROR:'+e.message)}}"
       $createOut = (ssh @sshOpts "$sshUser@$cfgIp" "sudo mongosh --quiet $sysAuth '$cfgRsUri' --eval `"$createEval`" 2>&1" | Out-String).Trim()
@@ -119,7 +122,7 @@ resource "null_resource" "mongo_add_shards" {
       }
 
       # All mongos operations auth as the cluster admin user against admin.
-      $sysAuthArgs = "--username $adminUser --password '$keyfileContent' --authenticationDatabase admin"
+      $sysAuthArgs = "$tlsArgs --username $adminUser --password '$keyfileContent' --authenticationDatabase admin"
 
       # Wait for mongos to be reachable (sh.status() runs via mongos).
       Write-Host "[add-shards] waiting for mongos to accept commands (auth $adminUser)..."

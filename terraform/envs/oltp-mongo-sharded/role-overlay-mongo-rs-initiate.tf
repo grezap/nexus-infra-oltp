@@ -100,7 +100,10 @@ resource "null_resource" "mongo_rs_initiate" {
       if (-not $keyfileContent -or $keyfileContent.Length -lt 100) {
         throw "[rs-initiate $rsName] keyfile missing or too short on $bootIp"
       }
-      $sysAuthArgs = "--username __system --password '$keyfileContent' --authenticationDatabase local --authenticationMechanism SCRAM-SHA-256"
+      # 0.N.1 wire mTLS: every mongosh dials the requireTLS listener with the
+      # node's own leaf as its client cert (empty when TLS is disabled).
+      $tlsArgs = '${var.enable_mongo_tls ? "--tls --tlsCAFile /etc/nexus-mongo/tls/ca.crt --tlsCertificateKeyFile /etc/nexus-mongo/tls/server.pem" : ""}'
+      $sysAuthArgs = "$tlsArgs --username __system --password '$keyfileContent' --authenticationDatabase local --authenticationMechanism SCRAM-SHA-256"
 
       # Stage 1: probe rs.status() for existing healthy RS.
       $probeEval = "try{print(rs.status().ok)}catch(e){print(0)}"
@@ -111,7 +114,7 @@ resource "null_resource" "mongo_rs_initiate" {
         # rs.initiate is allowed pre-auth on a fresh cluster.
         $initJs = "${local.sharded_rs_init_js[each.key]}"
         Write-Host "[rs-initiate $rsName] running rs.initiate..."
-        $initOut = (ssh @sshOpts "$sshUser@$bootIp" "sudo mongosh --quiet --host 127.0.0.1:$port --eval `"printjson($initJs)`" 2>&1" | Out-String)
+        $initOut = (ssh @sshOpts "$sshUser@$bootIp" "sudo mongosh --quiet $tlsArgs --host 127.0.0.1:$port --eval `"printjson($initJs)`" 2>&1" | Out-String)
         if ($initOut -notmatch 'ok:\s*1') {
           Write-Host $initOut.Trim()
           throw "[rs-initiate $rsName] rs.initiate did not return ok:1"

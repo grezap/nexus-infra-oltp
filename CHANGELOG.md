@@ -6,6 +6,36 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — Phase 0.N.1: wire mTLS for the sharded MongoDB cluster (2026-07-10)
+
+- **The 11-VM `oltp-mongo-sharded` tier gained Vault-PKI wire mTLS** — parity with the 0.G.2 mongo RS.
+  It was keyFile-only (no wire TLS) before. Delivered as an **11-VM cold-rebuild** (destroy → from-zero
+  apply at `-parallelism=3`) that **succeeded in a single pass — 92 resources, ZERO transients**.
+- **Two new overlays** in `terraform/envs/oltp-mongo-sharded/`:
+  - `role-overlay-mongo-vault-agents.tf` — a per-host Vault Agent (`nexus-vault-agent.service`) on all 11
+    nodes (reads the `vault-agent-oltp-mongo-sharded-<host>.json` sidecars from the security env; installs
+    the vault binary + AppRole auth → token sink).
+  - `role-overlay-mongo-tls.tf` — template 70 renders the per-host leaf (`pkiCert
+    pki_int/issue/mongo-sharded-server`, CN `<host>.mongo.nexus.lab`) → `mongo-tls-split.sh` →
+    `server.pem` (leaf+PKCS#8 key) + `ca.crt` (intermediate+root). Templates 71/72 dropped — the keyFile
+    stays from the existing build-host `role-overlay-mongo-keyfile.tf`.
+- **`role-overlay-mongo-config.tf`** now injects `net.tls` (`mode: requireTLS`, `certificateKeyFile`,
+  `CAFile`, `allowConnectionsWithoutCertificates: false`, `disabledProtocols TLS1_0,TLS1_1`) into BOTH the
+  mongod (cfg/shard) and mongos config shapes when `var.enable_mongo_tls`; `depends_on` the TLS overlay so
+  certs exist before mongod restarts with `requireTLS`. `clusterAuthMode` stays keyFile (member auth) —
+  TLS adds wire encryption only.
+- **`rs-initiate` + `add-shards`** — every `mongosh` invocation gains `--tls --tlsCAFile … --
+  tlsCertificateKeyFile …` (folded into the `__system` + operator auth strings, terraform-gated on
+  `enable_mongo_tls`). No template rebuild needed (mongod TLS is native; the vault binary is installed by
+  the overlay).
+- **`scripts/smoke-0.N.ps1` §9 (Wire mTLS):** every check now connects over TLS (`$tlsArgs` folded into
+  both auth strings) + a new section — per-host leaf CN, ca.crt chain depth, **`requireTLS` rejects a
+  non-TLS connection**, and an mTLS ping succeeds.
+- **LIVE-VERIFIED:** cold-rebuild ALL GREEN (incl §9); `nexus health mongo-sharded` 16/16 GREEN over TLS;
+  `nexus cert-rotate mongo-sharded` rotated all 11 nodes online (no re-election); `nexus backup
+  take/restore` round-trip over `--ssl` (200 docs). Pairs with `nexus-infra-vmware` security env
+  (3 new mongo-sharded PKI/AppRole overlays).
+
 ### Changed — Platform CA rollover: `oltp-sqlserver` rebuilt to the new Vault PKI root — FINAL tier; **platform CA rollover COMPLETE** (2026-07-04/05)
 
 - **`oltp-sqlserver` (4 nodes — sql-fci-1/2 [WSFC FCI sharing an iSCSI LUN from nexus-gateway] +
