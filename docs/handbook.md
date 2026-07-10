@@ -1,6 +1,6 @@
 # nexus-infra-oltp operator handbook
 
-> **Status (Phase 0.G.1 + 0.G.2 + 0.G.3 + 0.G.3.5 + 0.G.4 + 0.G.7):** ✅ all
+> **Status (Phase 0.G.1 + 0.G.2 + 0.G.3 + 0.G.3.5 + 0.G.4 + 0.G.7 + 0.N + 0.N.1):** ✅ all
 > five OLTP cluster sub-phases shipped per-cluster + per-engine.
 > 0.G.1+0.G.2+0.G.3+0.G.3.5 **PROVEN cold-rebuildable (2026-05-18)**; 0.G.4
 > (Patroni + etcd + HAProxy) closed 2026-05-19; **0.G.7 (SQL Server FCI +
@@ -340,9 +340,11 @@ This is the key win over the legacy monolithic `oltp.ps1 destroy` which would te
 > `oltp-patroni`/postgres (2026-06-29) · `oltp-sqlserver` FCI+AG (2026-07-05, the FINAL genuinely-old-root
 > tier, closing the platform-wide CA rollover). Each rebuild ran `destroy → apply → smoke ALL GREEN` with
 > `nexus cert-rotate <cluster>` GREEN as the new-root proof (the verb x509-fails on an old-root cluster
-> and succeeds only post-rebuild). `mongo-sharded` (0.N) is CA-rollover-N/A (keyFile-only internal auth,
-> no per-node Vault agents / no wire TLS → nothing tied to the dead root). No source `.tf` changed on any
-> tier. Full per-tier chronology in the CHANGELOG `[Unreleased]` "Platform CA rollover" entries.
+> and succeeds only post-rebuild). `mongo-sharded` (0.N) subsequently gained wire mTLS via **0.N.1**
+> (2026-07-10, §3.Nc): per-host `mongo-sharded-server` Vault-PKI leaves + per-host Vault agents +
+> `requireTLS`, all issued from the new Vault root — so mongo-sharded is now on the new root too (no longer
+> CA-rollover-N/A). No source `.tf` changed on any tier. Full per-tier chronology in the CHANGELOG
+> `[Unreleased]` "Platform CA rollover" entries.
 
 Canonical per-cluster cycle (each cluster independent, can be ordered or parallel):
 

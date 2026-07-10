@@ -4,7 +4,7 @@
 [![Terraform](https://img.shields.io/badge/Terraform-1.9+-purple)](https://www.terraform.io/)
 [![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![Blueprint](https://img.shields.io/badge/blueprint-nexus--platform--plan%20v0.1.3-orange)](https://github.com/grezap/nexus-platform-plan)
-[![Phase](https://img.shields.io/badge/phase-OLTP%20tier%20SEALED%206%2F6%20%E2%80%A2%20CA%20rollover%20COMPLETE-brightgreen)](./CHANGELOG.md)
+[![Phase](https://img.shields.io/badge/phase-OLTP%20tier%20SEALED%206%2F6%20%E2%80%A2%20CA%20rollover%20COMPLETE%20%E2%80%A2%200.N.1%20mongo--sharded%20wire%20mTLS-brightgreen)](./CHANGELOG.md)
 [![Release](https://img.shields.io/badge/release-unreleased-lightgrey)](./CHANGELOG.md)
 
 OLTP data tier of the **NexusPlatform lab** (140 VMs built through Phase 0.P) — Redis Cluster · MongoDB RS · Percona XtraDB Cluster + ProxySQL · PostgreSQL Patroni + etcd + HAProxy · SQL Server FCI + AG · MongoDB sharded. 37 VMs across tiers `02-sqlserver` (4 Windows) + `05-oltp` (33 Linux — redis 6 + mongo 3 + percona 5 + patroni 8 + mongo-sharded 11).
@@ -19,7 +19,7 @@ OLTP data tier of the **NexusPlatform lab** (140 VMs built through Phase 0.P) �
 
 ## Status
 
-**OLTP tier SEALED 6/6** (redis · mongo · percona · patroni · sqlserver-fci/ag · mongo-sharded) — all live-ratified + cold-rebuild-proven, and **CA rollover COMPLETE 2026-07-05** (every cluster rebuilt onto the new Vault PKI root). Each sub-phase paired a cluster bring-up with a `nexus-cli` `v0.6.x` release that adds 13 verb groups for that cluster:
+**OLTP tier SEALED 6/6** (redis · mongo · percona · patroni · sqlserver-fci/ag · mongo-sharded) — all live-ratified + cold-rebuild-proven, and **CA rollover COMPLETE 2026-07-05** (every cluster rebuilt onto the new Vault PKI root). **0.N.1 (2026-07-10): mongo-sharded gained wire mTLS** — per-host `mongo-sharded-server` Vault-PKI leaves + per-host Vault agents + `requireTLS`, all issued from the new Vault root (so mongo-sharded is now on the new root too). Each sub-phase paired a cluster bring-up with a `nexus-cli` `v0.6.x` release that adds 13 verb groups for that cluster:
 
 | Sub-phase | Cluster | VMs | nexus-cli release | Status |
 |---|---|---|---|---|
@@ -32,7 +32,8 @@ OLTP data tier of the **NexusPlatform lab** (140 VMs built through Phase 0.P) �
 | 0.G.3.5c chunk 2 | delete legacy `packer/oltp-node/` + `envs/oltp/` + `scripts/oltp.ps1` + drop legacy CI matrix entries + handbook canonicalization | — | — | ✅ removed 2026-05-18 (this commit) |
 | 0.G.4 | PostgreSQL Patroni + etcd + HAProxy HA pair + VRRP VIP `.60` | 8 (3 PG + 3 etcd + 2 HAProxy) | v0.6.3 PatroniAdapter | ✅ SEALED — live-ratified + cold-rebuild-proven; CA-rolled-over to the new Vault root (2026-06-29) |
 | 0.G.7 | SQL Server FCI + AG | 4 (2 FCI + 2 AG replicas, `ws2025-desktop`) | v0.6.6 SqlFciAdapter + SqlAgAdapter | ✅ SEALED 2026-05-22 (smoke 56/56); CA rollover COMPLETE — FINAL tier onto the new Vault root (2026-07-05) |
-| 0.N | MongoDB sharded (3 cfg + 2×3 shards + 2 mongos) | 11 | — | ✅ SEALED 2026-05-30 (smoke 50/50); CA-rollover-N/A (keyFile-only, no per-node wire TLS) |
+| 0.N | MongoDB sharded (3 cfg + 2×3 shards + 2 mongos) | 11 | — | ✅ SEALED 2026-05-30 (smoke 50/50 initial); wire mTLS added in 0.N.1 (see below) → smoke gained §9; now on the new Vault root |
+| 0.N.1 | MongoDB sharded — wire mTLS (`requireTLS` + per-host `mongo-sharded-server` Vault-PKI leaves + per-host Vault agents) | 11 | — | ✅ DONE + LIVE-VERIFIED 2026-07-10 (11-VM cold-rebuild, 1-pass, 0 transient); issued from the new Vault root; online `rotateCertificates` (no re-election) |
 
 Analytics tier (ClickHouse + StarRocks, sub-phases 0.G.5 + 0.G.6) lives in the sibling repo [`nexus-infra-analytics`](https://github.com/grezap/nexus-infra-analytics) (created when 0.G.5 starts).
 
@@ -41,7 +42,7 @@ Analytics tier (ClickHouse + StarRocks, sub-phases 0.G.5 + 0.G.6) lives in the s
 The OLTP tier consumes state from earlier-phase tiers:
 
 - **Foundation tier alive** — `nexus-gateway` (dnsmasq DHCP + DNS + dhcp-host reservations for the 25 OLTP MACs) + `dc-nexus` (AD DS for SQL FCI domain auth) + `nexus-jumpbox`. Managed in [`nexus-infra-vmware`](https://github.com/grezap/nexus-infra-vmware) (`envs/foundation`).
-- **Security tier alive** — 3-node Vault HA cluster + `vault-transit` auto-unseal + PKI hierarchy. Per-cluster PKI roles (`redis-server`, `mongo-server`, `percona-server`, `patroni-server`, `sql-fci-server`) issue 90-day leaf certs for mTLS; per-node Vault Agent AppRoles render the certs + cluster bootstrap creds from `nexus/data/<cluster>/*` KV. Managed in [`nexus-infra-vmware`](https://github.com/grezap/nexus-infra-vmware) (`envs/security`).
+- **Security tier alive** — 3-node Vault HA cluster + `vault-transit` auto-unseal + PKI hierarchy. Per-cluster PKI roles (`redis-server`, `mongo-server`, `percona-server`, `patroni-server`, `sql-fci-server`, `mongo-sharded-server`) issue 90-day leaf certs for mTLS; per-node Vault Agent AppRoles render the certs + cluster bootstrap creds from `nexus/data/<cluster>/*` KV. Managed in [`nexus-infra-vmware`](https://github.com/grezap/nexus-infra-vmware) (`envs/security`).
 
 Per `feedback_handbook_standard.md` invariant 2, the exact-from-zero replay path enumerates this dependency chain (with hostnames + IPs + how to verify each prerequisite is alive) in `docs/handbook.md` §0.
 
