@@ -18,9 +18,13 @@ variable "output_directory" {
 }
 
 variable "iso_url" {
-  type        = string
-  default     = "https://cdimage.debian.org/debian-cd/13.5.0/amd64/iso-cd/debian-13.5.0-amd64-netinst.iso"
-  description = "Debian 13.5.0 netinst ISO. NEWER point release than the canonical 13.4.0 used by nexus-infra-kafka/packer/kafka-node + nexus-infra-vmware/packer/{deb13,vault} + nexus-infra-swarm-nomad/packer/swarm-node -- bumped here at 0.G.1 ratification 2026-05-17 because the mirror dropped 13.4.0 the same day Debian published 13.5.0 (HTTP 404). The other templates' .pkr.hcl files will also need this bump the next time they get rebuilt; existing built artifacts in H:\\VMS\\NexusPlatform\\_templates\\ are frozen from when 13.4.0 was current and don't need touching. Override via `-var iso_url=H:/VMS/ISO/debian-13-amd64-netinst.iso` to consume the local cache per memory/project_iso_directory.md -- Packer's content-addressed cache under packer_cache/ also avoids re-download across builds."
+  type    = string
+  default = "H:/VMS/ISO/debian-13.5.0-amd64-netinst.iso"
+  # Local ISO from the lab canon dir (H:/VMS/ISO/, project_iso_directory). The
+  # upstream mirror rotates point releases off iso-cd/ into archive within months
+  # (13.5.0 already 404s there as of 2026-07), so a remote default breaks replay;
+  # the checksum below still pins integrity. For a fresh host, fetch the ISO into
+  # H:/VMS/ISO/ once (or override -var iso_url=<url> against the archive mirror).
 }
 
 variable "iso_checksum" {

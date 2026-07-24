@@ -16,7 +16,12 @@ variable "output_directory" {
 
 variable "iso_url" {
   type    = string
-  default = "https://cdimage.debian.org/debian-cd/13.5.0/amd64/iso-cd/debian-13.5.0-amd64-netinst.iso"
+  default = "H:/VMS/ISO/debian-13.5.0-amd64-netinst.iso"
+  # Local ISO from the lab canon dir (H:/VMS/ISO/, project_iso_directory). The
+  # upstream mirror rotates point releases off iso-cd/ into archive within months
+  # (13.5.0 already 404s there as of 2026-07), so a remote default breaks replay;
+  # the checksum below still pins integrity. For a fresh host, fetch the ISO into
+  # H:/VMS/ISO/ once (or override -var iso_url=<url> against the archive mirror).
 }
 
 variable "iso_checksum" {

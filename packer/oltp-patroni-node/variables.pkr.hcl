@@ -19,9 +19,13 @@ variable "output_directory" {
 }
 
 variable "iso_url" {
-  type        = string
-  default     = "https://cdimage.debian.org/debian-cd/13.5.0/amd64/iso-cd/debian-13.5.0-amd64-netinst.iso"
-  description = "Debian 13.5.0 netinst ISO. Same pin as sibling oltp-*-node templates -- bumped from 13.4.0 at 0.G.1 ratification 2026-05-17 when the mirror dropped that point release. Packer's content-addressed cache shares the download across all per-engine templates via $env:PACKER_CACHE_DIR='H:/VMS/packer_cache'."
+  type    = string
+  default = "H:/VMS/ISO/debian-13.5.0-amd64-netinst.iso"
+  # Local ISO from the lab canon dir (H:/VMS/ISO/, project_iso_directory). The
+  # upstream mirror rotates point releases off iso-cd/ into archive within months
+  # (13.5.0 already 404s there as of 2026-07), so a remote default breaks replay;
+  # the checksum below still pins integrity. For a fresh host, fetch the ISO into
+  # H:/VMS/ISO/ once (or override -var iso_url=<url> against the archive mirror).
 }
 
 variable "iso_checksum" {
